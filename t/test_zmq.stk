@@ -1,0 +1,95 @@
+## t/test_zmq.stk — assertion tests for the stryke `Zmq` package.
+##
+## Uses stryke's native test framework (`assert_*` + `test_run`).
+## Requires the cdylib to be loaded — install once with `s pkg install -g .`
+## so stryke's FFI bridge dlopens `lib/libstryke_zmq.{dylib,so}` on
+## `use Zmq`.
+##
+## Unlike a broker-backed package, ZeroMQ needs no external service: every
+## test runs over `inproc://` transport inside this process. So all
+## assertions below fire unconditionally in CI — no creds, no daemon.
+
+use Zmq
+
+# ── cdylib reachable ────────────────────────────────────────────────
+val $version = Zmq::version()
+assert_ok $version, "Zmq::version returns truthy (cdylib loaded)"
+
+# ── REQ/REP round-trip ──────────────────────────────────────────────
+val $rep_ep = "inproc://test-reqrep-$$"
+val $rep = Zmq::socket("rep", bind => $rep_ep)
+val $req = Zmq::socket("req", connect => $rep_ep)
+
+Zmq::send($req, "ping")
+val $server_got = Zmq::recv($rep, timeout_ms => 2000)
+assert_eq $server_got, "ping", "rep socket receives the request"
+
+Zmq::send($rep, "pong")
+val $client_got = Zmq::recv($req, timeout_ms => 2000)
+assert_eq $client_got, "pong", "req socket receives the reply"
+
+Zmq::close($req)
+Zmq::close($rep)
+
+# ── PUSH/PULL pipeline ──────────────────────────────────────────────
+val $pp_ep = "inproc://test-pushpull-$$"
+val $pull = Zmq::socket("pull", bind => $pp_ep)
+val $push = Zmq::socket("push", connect => $pp_ep)
+
+Zmq::send($push, "work-1")
+Zmq::send($push, "work-2")
+val $w1 = Zmq::recv($pull, timeout_ms => 2000)
+val $w2 = Zmq::recv($pull, timeout_ms => 2000)
+assert_eq $w1, "work-1", "pull receives first pushed item"
+assert_eq $w2, "work-2", "pull receives second pushed item in order"
+
+Zmq::close($push)
+Zmq::close($pull)
+
+# ── multipart over a PAIR ───────────────────────────────────────────
+val $mp_ep = "inproc://test-multipart-$$"
+val $a = Zmq::socket("pair", bind => $mp_ep)
+val $b = Zmq::socket("pair", connect => $mp_ep)
+
+Zmq::send_multipart($b, ["h", "body", "t"])
+val @frames = Zmq::recv_multipart($a, timeout_ms => 2000)
+assert_eq scalar(@frames), 3, "recv_multipart returns all three frames"
+assert_eq $frames[1], "body", "middle frame preserved"
+
+Zmq::close($a)
+Zmq::close($b)
+
+# ── recv timeout returns undef, not a die ───────────────────────────
+val $to_ep = "inproc://test-timeout-$$"
+val $idle = Zmq::socket("pull", bind => $to_ep)
+val $nothing = Zmq::recv($idle, timeout_ms => 100)
+assert_ok !defined($nothing), "recv on idle socket returns undef on timeout"
+Zmq::close($idle)
+
+# ── poll reports readiness ──────────────────────────────────────────
+val $poll_ep = "inproc://test-poll-$$"
+val $pr = Zmq::socket("pull", bind => $poll_ep)
+val $ps = Zmq::socket("push", connect => $poll_ep)
+Zmq::send($ps, "ready")
+val $st = Zmq::poll($pr, timeout_ms => 500)
+assert_ok $st->{readable}, "poll reports a queued message as readable"
+Zmq::close($ps)
+Zmq::close($pr)
+
+# ── subscribe / unsubscribe API ─────────────────────────────────────
+val $sub_ep = "inproc://test-sub-$$"
+val $sub = Zmq::socket("sub", connect => $sub_ep)
+val $sub_r = Zmq::subscribe($sub, "topic")
+assert_ok $sub_r->{ok}, "subscribe returns ok"
+val $unsub_r = Zmq::unsubscribe($sub, "topic")
+assert_ok $unsub_r->{ok}, "unsubscribe returns ok"
+Zmq::close($sub)
+
+# ── set socket option ───────────────────────────────────────────────
+val $set_ep = "inproc://test-set-$$"
+val $setsock = Zmq::socket("pub", bind => $set_ep)
+val $set_r = Zmq::set($setsock, "sndhwm", 500)
+assert_ok $set_r->{ok}, "set sndhwm returns ok"
+Zmq::close($setsock)
+
+test_run

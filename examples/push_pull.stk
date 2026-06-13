@@ -1,0 +1,21 @@
+#!/usr/bin/env stryke
+# examples/push_pull.stk — PUSH/PULL pipeline (fan-out work distribution).
+# Run:   s examples/push_pull.stk
+
+use Zmq
+
+val $endpoint = "inproc://example-pushpull"
+
+val $puller = Zmq::socket("pull", bind => $endpoint)
+val $pusher = Zmq::socket("push", connect => $endpoint)
+
+val @work = ("task-a", "task-b", "task-c")
+Zmq::send($pusher, $_) for @work
+
+for val $i (1:scalar(@work)) {
+    val $task = Zmq::recv($puller, timeout_ms => 1000)
+    p "worker got: $task"
+}
+
+Zmq::close($pusher)
+Zmq::close($puller)

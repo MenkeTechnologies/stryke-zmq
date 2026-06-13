@@ -1,0 +1,21 @@
+#!/usr/bin/env stryke
+# examples/req_rep.stk — REQ/REP round-trip over inproc, in one process.
+# Run:   s examples/req_rep.stk
+
+use Zmq
+
+val $endpoint = "inproc://example-reqrep"
+
+val $server = Zmq::socket("rep", bind => $endpoint)
+val $client = Zmq::socket("req", connect => $endpoint)
+
+Zmq::send($client, "ping")
+val $got = Zmq::recv($server, timeout_ms => 1000)
+p "server received: $got"
+
+Zmq::send($server, "pong")
+val $reply = Zmq::recv($client, timeout_ms => 1000)
+p "client received: $reply"
+
+Zmq::close($client)
+Zmq::close($server)

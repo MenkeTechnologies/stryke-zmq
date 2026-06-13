@@ -1,0 +1,30 @@
+## t/test_stryke_zmq_surface.stk — wrapper-completeness pin.
+##
+## Asserts every public `fn Zmq::name` declared in lib/Zmq.stk is
+## reachable via `use` at runtime. Uses `exists &Zmq::name` to probe the
+## symbol table without invoking the sub.
+##
+## Catches:
+##   * a wrapper sub deleted from lib/ but still referenced elsewhere
+##   * `use Zmq` failing to chase into lib/Zmq.stk
+##   * an installed-package entry whose namespace bridge is broken
+##
+## Permission-free — no service, no daemon. Private helpers (`_` prefix)
+## are implementation detail and are NOT asserted.
+
+use Zmq
+
+assert_ok exists &Zmq::version, "Zmq::version exists"
+assert_ok exists &Zmq::socket, "Zmq::socket exists"
+assert_ok exists &Zmq::close, "Zmq::close exists"
+assert_ok exists &Zmq::send, "Zmq::send exists"
+assert_ok exists &Zmq::send_multipart, "Zmq::send_multipart exists"
+assert_ok exists &Zmq::recv, "Zmq::recv exists"
+assert_ok exists &Zmq::recv_multipart, "Zmq::recv_multipart exists"
+assert_ok exists &Zmq::subscribe, "Zmq::subscribe exists"
+assert_ok exists &Zmq::unsubscribe, "Zmq::unsubscribe exists"
+assert_ok exists &Zmq::set, "Zmq::set exists"
+assert_ok exists &Zmq::poll, "Zmq::poll exists"
+assert_ok exists &Zmq::request, "Zmq::request exists"
+
+test_run

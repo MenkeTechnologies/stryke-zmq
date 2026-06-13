@@ -1,0 +1,27 @@
+#!/usr/bin/env stryke
+# examples/pub_sub.stk — PUB/SUB with a topic filter over inproc.
+# Run:   s examples/pub_sub.stk
+#
+# Note: a SUB must subscribe before the PUB sends, and ZMQ's slow-joiner
+# behaviour means early messages can be dropped while the connection
+# settles — this example sends a few so at least one arrives.
+
+use Zmq
+
+val $endpoint = "inproc://example-pubsub"
+
+val $publisher  = Zmq::socket("pub", bind => $endpoint)
+val $subscriber = Zmq::socket("sub", connect => $endpoint, subscribe => "weather")
+
+# Give the subscription time to propagate, then publish.
+for val $i (1:5) {
+    Zmq::send($publisher, "weather sunny $i")
+    val $msg = Zmq::recv($subscriber, timeout_ms => 200)
+    if (defined $msg) {
+        p "received: $msg"
+        last
+    }
+}
+
+Zmq::close($subscriber)
+Zmq::close($publisher)

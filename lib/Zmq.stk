@@ -1,0 +1,134 @@
+## lib/Zmq.stk — ZeroMQ client for stryke (`use Zmq`).
+##
+## Thin wrapper around the `stryke-zmq` cdylib's `zmq__*` exports.
+## The cdylib is dlopened in-process on first `use Zmq` (see stryke's
+## `pkg/commands.rs::try_load_ffi_for`) and registers each export as a
+## stryke-callable function via `rust_ffi::load_cdylib`.
+##
+## The cdylib holds one shared `zmq::Context` plus a socket registry —
+## `zmq__socket` returns an integer handle the caller keeps and passes to
+## later `send`/`recv`/`subscribe` calls. ZMQ sockets are stateful and
+## long-lived (a SUB must persist to receive, REQ/REP is a send→recv state
+## machine), so handles are the API surface, not per-call ephemeral sockets.
+##
+## libzmq is vendored into the cdylib — no system library needed on the
+## consumer machine.
+##
+## v0.1.0 surface: socket/close, send/send_multipart, recv/recv_multipart,
+## subscribe/unsubscribe, set (socket options), poll, and a one-shot
+## `request` REQ/REP convenience.
+
+package Zmq
+
+# ── error dispatch ────────────────────────────────────────────────────
+
+## Decode the cdylib's JSON return; die on `{error}` payload.
+fn Zmq::_decode ($name, $json) {
+    val $o = from_json $json
+    if (ref $o eq "HASH" && exists $o->{error}) {
+        die "Zmq::$name: $o->{error}"
+    }
+    $o
+}
+
+# ── version ─────────────────────────────────────────────────────────
+
+## Return the package version string.
+fn Zmq::version {
+    Zmq::_decode("pkg_version", zmq__pkg_version("{}"))->{version}
+}
+
+# ── socket lifecycle ────────────────────────────────────────────────
+
+## Create a socket of $type ("req","rep","pub","sub","push","pull",
+## "dealer","router","pair","xpub","xsub","stream") and return its handle.
+## opts: bind, connect (string or arrayref of endpoints), subscribe
+## (SUB topic[s]), sndhwm, rcvhwm, linger, sndtimeo, rcvtimeo, identity,
+## conflate. Returns the integer handle.
+fn Zmq::socket ($type, %opts) {
+    var %r = %opts
+    $r{type} = $type
+    Zmq::_decode("socket", zmq__socket(to_json(\%r)))->{handle}
+}
+
+## Close a socket by handle.
+fn Zmq::close ($handle) {
+    Zmq::_decode("close", zmq__close(to_json({ handle => $handle })))
+}
+
+# ── send ────────────────────────────────────────────────────────────
+
+## Send $data on $handle. opts: more => 1 to keep a multipart message open.
+fn Zmq::send ($handle, $data, %opts) {
+    val $r = { handle => $handle, data => $data, more => $opts{more} }
+    Zmq::_decode("send", zmq__send(to_json($r)))
+}
+
+## Send a multipart message. $parts is an arrayref of strings.
+fn Zmq::send_multipart ($handle, $parts) {
+    die "Zmq::send_multipart: parts must be arrayref" unless ref($parts) eq "ARRAY"
+    Zmq::_decode("send_multipart",
+        zmq__send_multipart(to_json({ handle => $handle, parts => $parts })))
+}
+
+# ── recv ────────────────────────────────────────────────────────────
+
+## Receive one message on $handle. opts: timeout_ms (default: block
+## forever). Returns the payload string, or undef on timeout.
+fn Zmq::recv ($handle, %opts) {
+    val $o = Zmq::_decode("recv",
+        zmq__recv(to_json({ handle => $handle, timeout_ms => $opts{timeout_ms} })))
+    return undef if $o->{timeout}
+    $o->{data}
+}
+
+## Receive a multipart message. opts: timeout_ms. Returns a list of frame
+## strings, or empty list on timeout.
+fn Zmq::recv_multipart ($handle, %opts) {
+    val $o = Zmq::_decode("recv_multipart",
+        zmq__recv_multipart(to_json({ handle => $handle, timeout_ms => $opts{timeout_ms} })))
+    return () if $o->{timeout}
+    @{ $o->{parts} }
+}
+
+# ── pub/sub topic filters ───────────────────────────────────────────
+
+## Subscribe a SUB socket to $topic ("" = all messages).
+fn Zmq::subscribe ($handle, $topic) {
+    Zmq::_decode("subscribe",
+        zmq__subscribe(to_json({ handle => $handle, topic => $topic })))
+}
+
+## Remove a SUB subscription.
+fn Zmq::unsubscribe ($handle, $topic) {
+    Zmq::_decode("unsubscribe",
+        zmq__unsubscribe(to_json({ handle => $handle, topic => $topic })))
+}
+
+# ── socket options + poll ───────────────────────────────────────────
+
+## Set a socket option after creation. $opt: sndhwm, rcvhwm, linger,
+## sndtimeo, rcvtimeo (int), conflate (bool), identity (string).
+fn Zmq::set ($handle, $opt, $value) {
+    Zmq::_decode("set",
+        zmq__set(to_json({ handle => $handle, opt => $opt, value => $value })))
+}
+
+## Poll a socket for readiness. opts: timeout_ms (default 0 = non-blocking).
+## Returns a hashref { readable, writable }.
+fn Zmq::poll ($handle, %opts) {
+    Zmq::_decode("poll",
+        zmq__poll(to_json({ handle => $handle, timeout_ms => $opts{timeout_ms} })))
+}
+
+# ── one-shot request ────────────────────────────────────────────────
+
+## Connect an ephemeral REQ socket to $endpoint, send $data, return the
+## reply string (or undef on timeout). opts: timeout_ms (default 5000).
+## For repeated calls keep a `socket` handle instead.
+fn Zmq::request ($endpoint, $data, %opts) {
+    val $r = { endpoint => $endpoint, data => $data, timeout_ms => $opts{timeout_ms} }
+    val $o = Zmq::_decode("request", zmq__request(to_json($r)))
+    return undef if $o->{timeout}
+    $o->{reply}
+}

@@ -1,0 +1,18 @@
+#!/usr/bin/env stryke
+# examples/multipart.stk — multipart frames over a DEALER/ROUTER pair.
+# Run:   s examples/multipart.stk
+
+use Zmq
+
+val $endpoint = "inproc://example-multipart"
+
+val $router = Zmq::socket("pair", bind => $endpoint)
+val $dealer = Zmq::socket("pair", connect => $endpoint)
+
+Zmq::send_multipart($dealer, ["header", "body", "trailer"])
+
+val @frames = Zmq::recv_multipart($router, timeout_ms => 1000)
+p "received " . scalar(@frames) . " frames: " . join(" | ", @frames)
+
+Zmq::close($dealer)
+Zmq::close($router)

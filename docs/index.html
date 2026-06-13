@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="stryke-zmq — ZEROMQ CLIENT FOR STRYKE. Brokerless messaging: req/rep, pub/sub, push/pull, dealer/router, pair. Opt-in package with libzmq vendored into the cdylib.">
+  <title>stryke-zmq — Documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&amp;family=Share+Tech+Mono&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="hud-static.css">
+  <link rel="stylesheet" href="tutorial.css">
+  <style>
+    .tutorial-main { max-width: 68rem; margin: 0 auto; padding: 2rem 1.5rem; }
+    .lede { color: var(--text-dim); max-width: 46rem; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid var(--border); padding: 0.45rem 0.7rem; text-align: left; font-size: 13px; }
+    th { color: var(--accent); }
+    code, pre { font-family: 'Share Tech Mono', ui-monospace, monospace; }
+    pre { border: 1px solid var(--border); padding: 0.9rem 1.1rem; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main class="tutorial-main">
+    <h1>stryke-zmq</h1>
+    <p class="lede">ZeroMQ client for stryke — brokerless messaging. Request/reply,
+    publish/subscribe, push/pull pipeline, and dealer/router, over TCP, IPC, or
+    in-process transports. libzmq is vendored into the cdylib, so there is no
+    system library requirement on the consumer machine.</p>
+
+    <p>
+      <a href="https://github.com/MenkeTechnologies/stryke-zmq" target="_blank" rel="noopener noreferrer">Source</a>
+      &middot;
+      <a href="https://github.com/MenkeTechnologies/strykelang" target="_blank" rel="noopener noreferrer">strykelang</a>
+      &middot;
+      <a href="report.html">Status report</a>
+    </p>
+
+    <h2>Install</h2>
+    <pre>s pkg install -g github.com/MenkeTechnologies/stryke-zmq</pre>
+
+    <h2>Quick start</h2>
+    <pre>use Zmq
+
+val $server = Zmq::socket("rep", bind =&gt; "tcp://*:5555")
+val $client = Zmq::socket("req", connect =&gt; "tcp://localhost:5555")
+
+Zmq::send($client, "ping")
+val $request = Zmq::recv($server, timeout_ms =&gt; 1000)   # "ping"
+Zmq::send($server, "pong")
+val $reply = Zmq::recv($client, timeout_ms =&gt; 1000)     # "pong"
+
+Zmq::close($client)
+Zmq::close($server)</pre>
+
+    <h2>API</h2>
+    <table>
+      <thead>
+        <tr><th>Function</th><th>Returns</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Zmq::version()</td><td>string</td><td>package version</td></tr>
+        <tr><td>Zmq::socket($type, %opts)</td><td>handle</td><td>req/rep/pub/sub/push/pull/dealer/router/pair/xpub/xsub/stream</td></tr>
+        <tr><td>Zmq::close($handle)</td><td>hashref</td><td>close + remove socket</td></tr>
+        <tr><td>Zmq::send($handle, $data, %opts)</td><td>hashref</td><td>more =&gt; 1 for multipart</td></tr>
+        <tr><td>Zmq::send_multipart($handle, $parts)</td><td>hashref</td><td>arrayref of frames</td></tr>
+        <tr><td>Zmq::recv($handle, %opts)</td><td>string | undef</td><td>timeout_ms; undef on timeout</td></tr>
+        <tr><td>Zmq::recv_multipart($handle, %opts)</td><td>list</td><td>timeout_ms; empty on timeout</td></tr>
+        <tr><td>Zmq::subscribe($handle, $topic)</td><td>hashref</td><td>SUB filter ("" = all)</td></tr>
+        <tr><td>Zmq::unsubscribe($handle, $topic)</td><td>hashref</td><td>remove subscription</td></tr>
+        <tr><td>Zmq::set($handle, $opt, $value)</td><td>hashref</td><td>sndhwm/rcvhwm/linger/timeo/conflate/identity</td></tr>
+        <tr><td>Zmq::poll($handle, %opts)</td><td>hashref</td><td>{ readable, writable }</td></tr>
+        <tr><td>Zmq::request($endpoint, $data, %opts)</td><td>string | undef</td><td>one-shot REQ round-trip</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Design</h2>
+    <p>Sockets are stateful, so the API is handle-based: <code>Zmq::socket</code>
+    returns an integer handle the caller keeps. The cdylib holds one shared
+    <code>zmq::Context</code> and a socket registry behind a mutex — that gives
+    ZeroMQ's required one-thread-at-a-time access plus the memory fence libzmq
+    mandates when a socket migrates between threads. Each <code>zmq__*</code>
+    export is JSON-string-in / JSON-string-out; errors become a stryke
+    <code>die</code>, timeouts become <code>undef</code>.</p>
+  </main>
+</body>
+</html>

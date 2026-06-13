@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cmake (vendored libzmq build)
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - run: cargo check --all-targets --locked
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install cmake (vendored libzmq build)
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    env:
+      RUST_BACKTRACE: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cmake (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - run: cargo test --locked --no-fail-fast
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cmake (vendored libzmq build)
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+
+  release-build:
+    name: Release Build (${{ matrix.target }})
+    needs: [check, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cmake (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: stryke-zmq-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/libstryke_zmq.*
+
+  docs-gates:
+    name: Docs gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash tests/docs-target-blank-rel-noopener.sh
+      - run: bash tests/docs-no-http-links.sh
+      - run: bash tests/docs-no-inline-handlers.sh
+
+  polish-gates:
+    name: Polish gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash tests/man-page-no-trailing-whitespace.sh
+      - run: bash tests/man-page-final-newline.sh
+      - run: bash tests/man-page-synopsis-section.sh
+      - run: bash tests/tests-shell-executable.sh
+      - run: bash tests/tests-shell-shebang.sh
+
+  semantic-gates:
+    name: Semantic gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash tests/docs-has-h1.sh
+      - run: bash tests/docs-no-deprecated-tags.sh
+      - run: bash tests/docs-no-placeholder-href.sh
+
+  newline-gates:
+    name: Newline + README gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash tests/readme-final-newline.sh
+      - run: bash tests/docs-final-newline.sh
+      - run: bash tests/workflow-final-newline.sh
+      - run: bash tests/cargo-final-newline.sh
+      - run: bash tests/readme-has-https-link.sh
+
+  structure-gates:
+    name: Structure gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: bash tests/readme-has-h2-section.sh
+      - run: bash tests/readme-has-badges.sh
+      - run: bash tests/docs-has-html-closing.sh
+      - run: bash tests/docs-has-body-tag.sh
+      - run: bash tests/workflow-no-tabs.sh
