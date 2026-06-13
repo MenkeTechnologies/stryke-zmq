@@ -138,21 +138,38 @@ process closes everything via libzmq's `zmq_close` on drop.
 
 | Function | Returns | Notes |
 |---|---|---|
-| `Zmq::version()` | string | package version |
-| `Zmq::socket($type, %opts)` | handle (int) | type: req/rep/pub/sub/push/pull/dealer/router/pair/xpub/xsub/stream. opts: bind, connect, subscribe, sndhwm, rcvhwm, linger, sndtimeo, rcvtimeo, identity, conflate |
+| `Zmq::version()` | string | package (crate) version |
+| `Zmq::lib_version()` | hashref | vendored libzmq `{ major, minor, patch, version }` |
+| `Zmq::has($capability)` | bool \| undef | probe `curve`/`gssapi`/`ipc`/`pgm`/`tipc`/`norm`/`draft` |
+| `Zmq::socket($type, %opts)` | handle (int) | type: req/rep/pub/sub/push/pull/dealer/router/pair/xpub/xsub/stream. opts: bind, connect, subscribe + any settable option (see `set`) |
 | `Zmq::close($handle)` | hashref | closes + removes the socket |
-| `Zmq::send($handle, $data, %opts)` | hashref | opts: `more => 1` for multipart continuation |
-| `Zmq::send_multipart($handle, $parts)` | hashref | `$parts` is an arrayref of strings |
-| `Zmq::recv($handle, %opts)` | string \| undef | opts: timeout_ms. undef on timeout |
-| `Zmq::recv_multipart($handle, %opts)` | list | opts: timeout_ms. empty list on timeout |
+| `Zmq::bind($handle, $endpoint)` | string | binds; returns the concrete endpoint (resolves `tcp://*:*`) |
+| `Zmq::connect($handle, $endpoint)` | hashref | dynamic connect |
+| `Zmq::unbind($handle, $endpoint)` | hashref | drop a bound endpoint |
+| `Zmq::disconnect($handle, $endpoint)` | hashref | drop a connected endpoint |
+| `Zmq::send($handle, $data, %opts)` | hashref | opts: `more => 1`; `encoding => utf8\|hex\|base64` |
+| `Zmq::send_multipart($handle, $parts, %opts)` | hashref | `$parts` arrayref; opts: `encoding` |
+| `Zmq::recv($handle, %opts)` | string \| undef | opts: timeout_ms, encoding. undef on timeout |
+| `Zmq::recv_multipart($handle, %opts)` | list | opts: timeout_ms, encoding. empty list on timeout |
 | `Zmq::subscribe($handle, $topic)` | hashref | SUB topic filter (`""` = all) |
 | `Zmq::unsubscribe($handle, $topic)` | hashref | remove a subscription |
-| `Zmq::set($handle, $opt, $value)` | hashref | sndhwm/rcvhwm/linger/sndtimeo/rcvtimeo (int), conflate (bool), identity (string) |
+| `Zmq::set($handle, $opt, $value)` | hashref | full socket-option table: timeouts/buffers/hwm, tcp_keepalive\*, heartbeat\*, ipv6, immediate, conflate, router/req flags, CURVE keys, plain auth, identity… |
+| `Zmq::get($handle, $opt)` | scalar | read back any option (type, last_endpoint, mechanism, fd, CURVE keys as z85, …) |
 | `Zmq::poll($handle, %opts)` | hashref | `{ readable, writable }`; opts: timeout_ms |
-| `Zmq::request($endpoint, $data, %opts)` | string \| undef | one-shot REQ round-trip; opts: timeout_ms (default 5000) |
+| `Zmq::poll_many($handles, %opts)` | list | one `zmq_poll` over many handles → `{ handle, readable, writable, error }` |
+| `Zmq::monitor($handle, $endpoint, %opts)` | hashref | publish lifecycle events to an inproc endpoint; opts: `events` |
+| `Zmq::monitor_recv($handle, %opts)` | hashref \| undef | decode one event `{ event, value, endpoint }` from a monitor PAIR |
+| `Zmq::proxy($frontend, $backend, %opts)` | hashref | backgrounded `zmq_proxy` device; opts: `capture`, `control` (steerable) |
+| `Zmq::curve_keypair()` | hashref | `{ public, secret }` z85 keys (needs libsodium-enabled libzmq) |
+| `Zmq::z85_encode($data, %opts)` / `Zmq::z85_decode($z85, %opts)` | string | z85 codec; opts: `encoding` |
+| `Zmq::request($endpoint, $data, %opts)` | string \| undef | one-shot REQ round-trip; opts: timeout_ms (default 5000), encoding |
 
 Endpoints follow ZeroMQ's transport syntax: `tcp://host:port`,
 `ipc:///tmp/sock`, `inproc://name`, `pgm://`, `epgm://`.
+
+Payloads default to UTF-8 framing. For arbitrary bytes (NULs, high bytes)
+pass `encoding => "hex"` or `encoding => "base64"` on both the send and the
+matching recv so the message round-trips intact.
 
 ## [0x05] FFI layer
 
@@ -176,10 +193,13 @@ s test t/                  # stryke assertion suite (needs the cdylib installed)
 ```
 
 The Rust tests exercise the full socket lifecycle, push/pull and pair
-round-trips, the timeout-to-flag mapping, and every argument-validation
-path over `inproc://` transport — no external broker required. The stryke
-suite re-checks the same patterns through the wrapper plus a
-symbol-completeness pin over `lib/Zmq.stk`.
+round-trips, the timeout-to-flag mapping, binary-safe hex framing through
+real sockets, `set`→`get` option round-trips, wildcard-bind endpoint
+discovery, `poll_many` over multiple handles, the z85 codec, libzmq
+introspection, an end-to-end socket-event monitor, and every
+argument-validation path over `inproc://` transport — no external broker
+required. The stryke suite re-checks the same patterns through the wrapper
+plus a symbol-completeness pin over `lib/Zmq.stk`.
 
 ## [0x07] Dev workflow
 
@@ -208,10 +228,17 @@ stryke-zmq/
 
 ## [0x09] Roadmap
 
-- CURVE security (libsodium is already linked) — key-pair auth on sockets.
+Shipped: binary-safe payloads (`encoding => hex|base64`), multi-socket
+`poll_many`, the full socket-option table (`set`/`get`), dynamic
+bind/connect/unbind/disconnect, socket-event monitoring, a backgrounded
+`proxy` device, and the z85 codec + `curve_keypair` (CURVE key auth on
+sockets via `curve_*` options; keypair generation needs a libsodium-enabled
+libzmq — probe `Zmq::has("curve")`).
+
+Open:
+
 - Streaming `recv` callback loop for long-running SUB/PULL consumers.
-- Binary-safe payloads via optional base64 framing.
-- Multi-socket `poll` over a set of handles.
+- A higher-level steerable-proxy control helper (PAUSE/RESUME/TERMINATE).
 
 ## [0xFF] License
 

@@ -12,7 +12,14 @@ lib-name = "stryke_zmq"
 namespace = "Zmq"
 exports = [
     "zmq__pkg_version",
+    "zmq__lib_version",
+    "zmq__has",
     "zmq__socket",
+    "zmq__close",
+    "zmq__bind",
+    "zmq__connect",
+    "zmq__unbind",
+    "zmq__disconnect",
     "zmq__send",
     "zmq__send_multipart",
     "zmq__recv",
@@ -20,8 +27,15 @@ exports = [
     "zmq__subscribe",
     "zmq__unsubscribe",
     "zmq__set",
+    "zmq__get",
     "zmq__poll",
-    "zmq__close",
+    "zmq__poll_many",
+    "zmq__monitor",
+    "zmq__monitor_recv",
+    "zmq__proxy",
+    "zmq__curve_keypair",
+    "zmq__z85_encode",
+    "zmq__z85_decode",
     "zmq__request",
 ]
 

@@ -22,6 +22,13 @@
 //! `zmq::Socket` is `Send` but not `Sync`. The `Mutex` both serializes
 //! access (ZMQ requires one-thread-at-a-time per socket) and provides the
 //! full memory fence ZMQ mandates when a socket migrates between threads.
+//!
+//! Surface: full socket lifecycle, the complete libzmq socket-option
+//! table (set + get), binary-safe send/recv (utf8/hex/base64 framing),
+//! dynamic bind/connect/unbind/disconnect, single- and multi-socket poll,
+//! socket-event monitoring, a backgrounded `proxy`/steerable proxy device,
+//! CURVE keypair generation + z85 codec, the vendored libzmq version, and
+//! capability probing via `has`.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -51,6 +58,10 @@ fn sockets() -> &'static Mutex<HashMap<u64, Socket>> {
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
+fn next_handle() -> u64 {
+    NEXT_HANDLE.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Run a closure against the socket registered under `handle`, holding the
 /// registry lock for the duration. The lock gives both ZMQ's required
 /// single-threaded access and the cross-thread memory fence.
@@ -63,6 +74,15 @@ where
         .get(&handle)
         .ok_or_else(|| anyhow!("unknown socket handle: {handle}"))?;
     f(sock)
+}
+
+/// Remove a socket from the registry, returning it for ownership transfer
+/// (used by `proxy`, which moves sockets into a background thread).
+fn take_socket(handle: u64) -> Result<Socket> {
+    sockets()
+        .lock()
+        .remove(&handle)
+        .ok_or_else(|| anyhow!("unknown socket handle: {handle}"))
 }
 
 // ── arg helpers ─────────────────────────────────────────────────────────────
@@ -109,30 +129,306 @@ fn parse_socket_type(s: &str) -> Result<SocketType> {
     })
 }
 
-/// Apply the optional socket tuning + connection keys shared by `socket`.
+/// Stringify a `SocketType` back to its lowercase name (for `get type`).
+fn socket_type_name(ty: SocketType) -> &'static str {
+    match ty {
+        SocketType::REQ => "req",
+        SocketType::REP => "rep",
+        SocketType::PUB => "pub",
+        SocketType::SUB => "sub",
+        SocketType::PUSH => "push",
+        SocketType::PULL => "pull",
+        SocketType::DEALER => "dealer",
+        SocketType::ROUTER => "router",
+        SocketType::PAIR => "pair",
+        SocketType::XPUB => "xpub",
+        SocketType::XSUB => "xsub",
+        SocketType::STREAM => "stream",
+    }
+}
+
+// ── binary-safe payload framing ──────────────────────────────────────────────
+//
+// ZMQ frames are arbitrary bytes; stryke strings are UTF-8. The default
+// "utf8" encoding round-trips text losslessly but mangles binary (lossy
+// replacement on recv). "hex" and "base64" carry arbitrary bytes intact.
+// Encoders are inlined to keep the cdylib dependency-free and vendorable.
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+        s.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+    }
+    s
+}
+
+fn hex_decode(s: &str) -> Result<Vec<u8>> {
+    let s = s.trim();
+    if !s.len().is_multiple_of(2) {
+        return Err(anyhow!("hex payload must have an even length"));
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16)
+                .map_err(|_| anyhow!("invalid hex byte at offset {i}"))
+        })
+        .collect()
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        out.push(B64[(n >> 18 & 0x3f) as usize] as char);
+        out.push(B64[(n >> 12 & 0x3f) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            B64[(n >> 6 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[(n & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>> {
+    fn val(c: u8) -> Result<u32> {
+        match c {
+            b'A'..=b'Z' => Ok((c - b'A') as u32),
+            b'a'..=b'z' => Ok((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Ok((c - b'0' + 52) as u32),
+            b'+' => Ok(62),
+            b'/' => Ok(63),
+            _ => Err(anyhow!("invalid base64 character")),
+        }
+    }
+    let s: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if !s.len().is_multiple_of(4) {
+        return Err(anyhow!("base64 payload length must be a multiple of 4"));
+    }
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for chunk in s.chunks(4) {
+        let pad = chunk.iter().filter(|&&c| c == b'=').count();
+        let n = (val(chunk[0])? << 18)
+            | (val(chunk[1])? << 12)
+            | (if chunk[2] == b'=' { 0 } else { val(chunk[2])? } << 6)
+            | (if chunk[3] == b'=' { 0 } else { val(chunk[3])? });
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// Decode an outbound payload string into raw bytes per `encoding`
+/// (default "utf8"). Used by every send path.
+fn payload_to_bytes(opts: &Value, data: &str) -> Result<Vec<u8>> {
+    match opts
+        .get("encoding")
+        .and_then(Value::as_str)
+        .unwrap_or("utf8")
+    {
+        "utf8" | "text" => Ok(data.as_bytes().to_vec()),
+        "hex" => hex_decode(data),
+        "base64" | "b64" => base64_decode(data),
+        other => Err(anyhow!("unknown encoding: {other} (want utf8|hex|base64)")),
+    }
+}
+
+/// Encode received raw bytes into a stryke string per `encoding`
+/// (default "utf8", lossy). Used by every recv path.
+fn bytes_to_payload(opts: &Value, bytes: &[u8]) -> Result<String> {
+    Ok(
+        match opts
+            .get("encoding")
+            .and_then(Value::as_str)
+            .unwrap_or("utf8")
+        {
+            "utf8" | "text" => String::from_utf8_lossy(bytes).into_owned(),
+            "hex" => hex_encode(bytes),
+            "base64" | "b64" => base64_encode(bytes),
+            other => return Err(anyhow!("unknown encoding: {other} (want utf8|hex|base64)")),
+        },
+    )
+}
+
+// ── socket option table ──────────────────────────────────────────────────────
+
+/// Apply one settable socket option. The single source of truth for both
+/// `socket` creation opts and the standalone `set` op, so the two never drift.
+/// Covers the full libzmq settable surface the `zmq` 0.10 crate exposes.
+fn set_one_opt(sock: &Socket, key: &str, val: &Value) -> Result<()> {
+    let i32v = || -> Result<i32> {
+        val.as_i64()
+            .map(|v| v as i32)
+            .ok_or_else(|| anyhow!("{key} expects an integer"))
+    };
+    let i64v = || -> Result<i64> {
+        val.as_i64()
+            .ok_or_else(|| anyhow!("{key} expects an integer"))
+    };
+    let u64v = || -> Result<u64> {
+        val.as_u64()
+            .ok_or_else(|| anyhow!("{key} expects an unsigned integer"))
+    };
+    let boolv = || -> Result<bool> {
+        val.as_bool()
+            .ok_or_else(|| anyhow!("{key} expects a boolean"))
+    };
+    let strv = || -> Result<&str> {
+        val.as_str()
+            .ok_or_else(|| anyhow!("{key} expects a string"))
+    };
+    match key {
+        // i32 tuning
+        "sndhwm" => sock.set_sndhwm(i32v()?)?,
+        "rcvhwm" => sock.set_rcvhwm(i32v()?)?,
+        "linger" => sock.set_linger(i32v()?)?,
+        "sndtimeo" => sock.set_sndtimeo(i32v()?)?,
+        "rcvtimeo" => sock.set_rcvtimeo(i32v()?)?,
+        "sndbuf" => sock.set_sndbuf(i32v()?)?,
+        "rcvbuf" => sock.set_rcvbuf(i32v()?)?,
+        "rate" => sock.set_rate(i32v()?)?,
+        "recovery_ivl" => sock.set_recovery_ivl(i32v()?)?,
+        "reconnect_ivl" => sock.set_reconnect_ivl(i32v()?)?,
+        "reconnect_ivl_max" => sock.set_reconnect_ivl_max(i32v()?)?,
+        "backlog" => sock.set_backlog(i32v()?)?,
+        "multicast_hops" => sock.set_multicast_hops(i32v()?)?,
+        "tos" => sock.set_tos(i32v()?)?,
+        "connect_timeout" => sock.set_connect_timeout(i32v()?)?,
+        "handshake_ivl" => sock.set_handshake_ivl(i32v()?)?,
+        "heartbeat_ivl" => sock.set_heartbeat_ivl(i32v()?)?,
+        "heartbeat_ttl" => sock.set_heartbeat_ttl(i32v()?)?,
+        "heartbeat_timeout" => sock.set_heartbeat_timeout(i32v()?)?,
+        "tcp_keepalive" => sock.set_tcp_keepalive(i32v()?)?,
+        "tcp_keepalive_cnt" => sock.set_tcp_keepalive_cnt(i32v()?)?,
+        "tcp_keepalive_idle" => sock.set_tcp_keepalive_idle(i32v()?)?,
+        "tcp_keepalive_intvl" => sock.set_tcp_keepalive_intvl(i32v()?)?,
+        // wider ints
+        "maxmsgsize" => sock.set_maxmsgsize(i64v()?)?,
+        "affinity" => sock.set_affinity(u64v()?)?,
+        // booleans
+        "ipv6" => sock.set_ipv6(boolv()?)?,
+        "immediate" => sock.set_immediate(boolv()?)?,
+        "conflate" => sock.set_conflate(boolv()?)?,
+        "probe_router" => sock.set_probe_router(boolv()?)?,
+        "router_mandatory" => sock.set_router_mandatory(boolv()?)?,
+        "router_handover" => sock.set_router_handover(boolv()?)?,
+        "req_relaxed" => sock.set_req_relaxed(boolv()?)?,
+        "req_correlate" => sock.set_req_correlate(boolv()?)?,
+        "xpub_verbose" => sock.set_xpub_verbose(boolv()?)?,
+        "plain_server" => sock.set_plain_server(boolv()?)?,
+        "curve_server" => sock.set_curve_server(boolv()?)?,
+        "gssapi_server" => sock.set_gssapi_server(boolv()?)?,
+        "gssapi_plaintext" => sock.set_gssapi_plaintext(boolv()?)?,
+        // byte-string identity / topic filters
+        "identity" => sock.set_identity(strv()?.as_bytes())?,
+        "subscribe" => sock.set_subscribe(strv()?.as_bytes())?,
+        "unsubscribe" => sock.set_unsubscribe(strv()?.as_bytes())?,
+        // CURVE keys — accept 40-char z85 or raw bytes; libzmq detects length
+        "curve_publickey" => sock.set_curve_publickey(strv()?.as_bytes())?,
+        "curve_secretkey" => sock.set_curve_secretkey(strv()?.as_bytes())?,
+        "curve_serverkey" => sock.set_curve_serverkey(strv()?.as_bytes())?,
+        // plain text auth + misc strings
+        "plain_username" => sock.set_plain_username(Some(strv()?))?,
+        "plain_password" => sock.set_plain_password(Some(strv()?))?,
+        "socks_proxy" => sock.set_socks_proxy(Some(strv()?))?,
+        "zap_domain" => sock.set_zap_domain(strv()?)?,
+        "xpub_welcome_msg" => sock.set_xpub_welcome_msg(Some(strv()?))?,
+        "gssapi_principal" => sock.set_gssapi_principal(strv()?)?,
+        "gssapi_service_principal" => sock.set_gssapi_service_principal(strv()?)?,
+        other => return Err(anyhow!("unknown or unsettable option: {other}")),
+    }
+    Ok(())
+}
+
+/// Read one socket option. Returns a JSON scalar matching the option's type;
+/// byte-string options come back hex-encoded and CURVE keys as z85.
+fn get_one_opt(sock: &Socket, key: &str) -> Result<Value> {
+    /// Collapse the crate's `Result<Result<String, Vec<u8>>>` (valid-UTF-8 vs
+    /// raw-bytes) into a JSON string, hex-encoding the non-UTF-8 case.
+    fn str_or_hex(r: zmq::Result<std::result::Result<String, Vec<u8>>>) -> Result<Value> {
+        Ok(match r? {
+            Ok(s) => Value::String(s),
+            Err(b) => Value::String(hex_encode(&b)),
+        })
+    }
+    Ok(match key {
+        "type" => json!(socket_type_name(sock.get_socket_type()?)),
+        "rcvmore" => json!(sock.get_rcvmore()?),
+        "sndhwm" => json!(sock.get_sndhwm()?),
+        "rcvhwm" => json!(sock.get_rcvhwm()?),
+        "linger" => json!(sock.get_linger()?),
+        "sndtimeo" => json!(sock.get_sndtimeo()?),
+        "rcvtimeo" => json!(sock.get_rcvtimeo()?),
+        "sndbuf" => json!(sock.get_sndbuf()?),
+        "rcvbuf" => json!(sock.get_rcvbuf()?),
+        "rate" => json!(sock.get_rate()?),
+        "recovery_ivl" => json!(sock.get_recovery_ivl()?),
+        "reconnect_ivl" => json!(sock.get_reconnect_ivl()?),
+        "reconnect_ivl_max" => json!(sock.get_reconnect_ivl_max()?),
+        "backlog" => json!(sock.get_backlog()?),
+        "multicast_hops" => json!(sock.get_multicast_hops()?),
+        "tos" => json!(sock.get_tos()?),
+        "connect_timeout" => json!(sock.get_connect_timeout()?),
+        "handshake_ivl" => json!(sock.get_handshake_ivl()?),
+        "heartbeat_ivl" => json!(sock.get_heartbeat_ivl()?),
+        "heartbeat_ttl" => json!(sock.get_heartbeat_ttl()?),
+        "heartbeat_timeout" => json!(sock.get_heartbeat_timeout()?),
+        "tcp_keepalive" => json!(sock.get_tcp_keepalive()?),
+        "maxmsgsize" => json!(sock.get_maxmsgsize()?),
+        "affinity" => json!(sock.get_affinity()?),
+        "fd" => json!(sock.get_fd()?),
+        "mechanism" => json!(format!("{:?}", sock.get_mechanism()?)),
+        "identity" => json!(hex_encode(&sock.get_identity()?)),
+        "last_endpoint" => str_or_hex(sock.get_last_endpoint())?,
+        "socks_proxy" => str_or_hex(sock.get_socks_proxy())?,
+        "plain_username" => str_or_hex(sock.get_plain_username())?,
+        "plain_password" => str_or_hex(sock.get_plain_password())?,
+        "zap_domain" => str_or_hex(sock.get_zap_domain())?,
+        "curve_publickey" => {
+            json!(zmq::z85_encode(&sock.get_curve_publickey()?).map_err(|e| anyhow!("{e}"))?)
+        }
+        "curve_secretkey" => {
+            json!(zmq::z85_encode(&sock.get_curve_secretkey()?).map_err(|e| anyhow!("{e}"))?)
+        }
+        "curve_serverkey" => {
+            json!(zmq::z85_encode(&sock.get_curve_serverkey()?).map_err(|e| anyhow!("{e}"))?)
+        }
+        other => return Err(anyhow!("unknown or unreadable option: {other}")),
+    })
+}
+
+/// Apply the creation-time opts: every settable socket option, plus the
+/// `bind`/`connect`/`subscribe` connection keys.
 fn apply_opts(sock: &Socket, opts: &Value) -> Result<()> {
-    if let Some(v) = opts.get("sndhwm").and_then(Value::as_i64) {
-        sock.set_sndhwm(v as i32)?;
+    // Reserved keys are consumed elsewhere; everything else is a socket option.
+    const RESERVED: &[&str] = &["type", "bind", "connect", "subscribe"];
+    if let Some(map) = opts.as_object() {
+        for (k, v) in map {
+            if RESERVED.contains(&k.as_str()) {
+                continue;
+            }
+            set_one_opt(sock, k, v)?;
+        }
     }
-    if let Some(v) = opts.get("rcvhwm").and_then(Value::as_i64) {
-        sock.set_rcvhwm(v as i32)?;
-    }
-    if let Some(v) = opts.get("linger").and_then(Value::as_i64) {
-        sock.set_linger(v as i32)?;
-    }
-    if let Some(v) = opts.get("sndtimeo").and_then(Value::as_i64) {
-        sock.set_sndtimeo(v as i32)?;
-    }
-    if let Some(v) = opts.get("rcvtimeo").and_then(Value::as_i64) {
-        sock.set_rcvtimeo(v as i32)?;
-    }
-    if let Some(v) = opts.get("identity").and_then(Value::as_str) {
-        sock.set_identity(v.as_bytes())?;
-    }
-    if let Some(v) = opts.get("conflate").and_then(Value::as_bool) {
-        sock.set_conflate(v)?;
-    }
-    // bind / connect accept a single endpoint or an array of them.
     for ep in str_list(opts, "bind") {
         sock.bind(&ep)?;
     }
@@ -149,22 +445,23 @@ fn apply_opts(sock: &Socket, opts: &Value) -> Result<()> {
 // ── ops ─────────────────────────────────────────────────────────────────────
 
 fn op_socket(opts: Value) -> Result<Value> {
-    let ty = parse_socket_type(req_str(&opts, "type")?)?;
+    let ty_name = req_str(&opts, "type")?.to_string();
+    let ty = parse_socket_type(&ty_name)?;
     let sock = ctx().socket(ty)?;
     apply_opts(&sock, &opts)?;
-    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    let handle = next_handle();
     sockets().lock().insert(handle, sock);
-    Ok(json!({"handle": handle, "type": req_str(&opts, "type")?}))
+    Ok(json!({"handle": handle, "type": ty_name}))
 }
 
 fn op_send(opts: Value) -> Result<Value> {
     let handle = req_u64(&opts, "handle")?;
-    let data = req_str(&opts, "data")?.to_string();
+    let bytes = payload_to_bytes(&opts, req_str(&opts, "data")?)?;
     let more = opts.get("more").and_then(Value::as_bool).unwrap_or(false);
     let flags = if more { zmq::SNDMORE } else { 0 };
     with_socket(handle, |s| {
-        s.send(data.as_bytes(), flags)?;
-        Ok(json!({"ok": true, "bytes": data.len()}))
+        s.send(&bytes, flags)?;
+        Ok(json!({"ok": true, "bytes": bytes.len()}))
     })
 }
 
@@ -176,8 +473,8 @@ fn op_send_multipart(opts: Value) -> Result<Value> {
         .ok_or_else(|| anyhow!("missing parts (expected array of strings)"))?;
     let bufs: Vec<Vec<u8>> = parts
         .iter()
-        .map(|v| v.as_str().unwrap_or("").as_bytes().to_vec())
-        .collect();
+        .map(|v| payload_to_bytes(&opts, v.as_str().unwrap_or("")))
+        .collect::<Result<_>>()?;
     let n = bufs.len();
     with_socket(handle, |s| {
         s.send_multipart(&bufs, 0)?;
@@ -192,19 +489,8 @@ fn is_eagain(e: &anyhow::Error) -> bool {
     e.downcast_ref::<zmq::Error>() == Some(&zmq::Error::EAGAIN)
 }
 
-fn op_recv(opts: Value) -> Result<Value> {
-    let handle = req_u64(&opts, "handle")?;
-    let timeout_ms = opts.get("timeout_ms").and_then(Value::as_i64);
-    let r = with_socket(handle, |s| {
-        if let Some(t) = timeout_ms {
-            s.set_rcvtimeo(t as i32)?;
-        }
-        let bytes = s.recv_bytes(0)?;
-        Ok(json!({
-            "data": String::from_utf8_lossy(&bytes),
-            "bytes": bytes.len(),
-        }))
-    });
+/// Map an `EAGAIN` result to `{timeout:true}`; propagate any other error.
+fn or_timeout(r: Result<Value>) -> Result<Value> {
     match r {
         Ok(v) => Ok(v),
         Err(e) if is_eagain(&e) => Ok(json!({"timeout": true})),
@@ -212,25 +498,36 @@ fn op_recv(opts: Value) -> Result<Value> {
     }
 }
 
+fn op_recv(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let timeout_ms = opts.get("timeout_ms").and_then(Value::as_i64);
+    or_timeout(with_socket(handle, |s| {
+        if let Some(t) = timeout_ms {
+            s.set_rcvtimeo(t as i32)?;
+        }
+        let bytes = s.recv_bytes(0)?;
+        Ok(json!({
+            "data": bytes_to_payload(&opts, &bytes)?,
+            "bytes": bytes.len(),
+            "more": s.get_rcvmore()?,
+        }))
+    }))
+}
+
 fn op_recv_multipart(opts: Value) -> Result<Value> {
     let handle = req_u64(&opts, "handle")?;
     let timeout_ms = opts.get("timeout_ms").and_then(Value::as_i64);
-    let r = with_socket(handle, |s| {
+    or_timeout(with_socket(handle, |s| {
         if let Some(t) = timeout_ms {
             s.set_rcvtimeo(t as i32)?;
         }
         let frames = s.recv_multipart(0)?;
         let parts: Vec<Value> = frames
             .iter()
-            .map(|f| Value::String(String::from_utf8_lossy(f).into_owned()))
-            .collect();
+            .map(|f| Ok(Value::String(bytes_to_payload(&opts, f)?)))
+            .collect::<Result<_>>()?;
         Ok(json!({"parts": parts}))
-    });
-    match r {
-        Ok(v) => Ok(v),
-        Err(e) if is_eagain(&e) => Ok(json!({"timeout": true})),
-        Err(e) => Err(e),
-    }
+    }))
 }
 
 fn op_subscribe(opts: Value) -> Result<Value> {
@@ -258,31 +555,16 @@ fn op_set(opts: Value) -> Result<Value> {
         .get("value")
         .ok_or_else(|| anyhow!("missing value"))?
         .clone();
-    let as_i32 = || -> Result<i32> {
-        val.as_i64()
-            .map(|v| v as i32)
-            .ok_or_else(|| anyhow!("{key} expects an integer value"))
-    };
     with_socket(handle, |s| {
-        match key.as_str() {
-            "sndhwm" => s.set_sndhwm(as_i32()?)?,
-            "rcvhwm" => s.set_rcvhwm(as_i32()?)?,
-            "linger" => s.set_linger(as_i32()?)?,
-            "sndtimeo" => s.set_sndtimeo(as_i32()?)?,
-            "rcvtimeo" => s.set_rcvtimeo(as_i32()?)?,
-            "conflate" => s.set_conflate(
-                val.as_bool()
-                    .ok_or_else(|| anyhow!("conflate expects a boolean value"))?,
-            )?,
-            "identity" => s.set_identity(
-                val.as_str()
-                    .ok_or_else(|| anyhow!("identity expects a string value"))?
-                    .as_bytes(),
-            )?,
-            other => return Err(anyhow!("unknown or unsettable option: {other}")),
-        }
+        set_one_opt(s, &key, &val)?;
         Ok(json!({"ok": true}))
     })
+}
+
+fn op_get(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let key = req_str(&opts, "opt")?.to_string();
+    with_socket(handle, |s| Ok(json!({ "value": get_one_opt(s, &key)? })))
 }
 
 fn op_poll(opts: Value) -> Result<Value> {
@@ -298,11 +580,278 @@ fn op_poll(opts: Value) -> Result<Value> {
     })
 }
 
+/// Poll several sockets in one libzmq `zmq_poll` call. `handles` is an array
+/// of socket handles; returns a parallel array of `{handle, readable, writable}`.
+fn op_poll_many(opts: Value) -> Result<Value> {
+    let handles: Vec<u64> = opts
+        .get("handles")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing handles (expected array of handles)"))?
+        .iter()
+        .map(|v| {
+            v.as_u64()
+                .ok_or_else(|| anyhow!("handle must be an integer"))
+        })
+        .collect::<Result<_>>()?;
+    let timeout_ms = opts.get("timeout_ms").and_then(Value::as_i64).unwrap_or(0);
+    let map = sockets().lock();
+    let socks: Vec<&Socket> = handles
+        .iter()
+        .map(|h| {
+            map.get(h)
+                .ok_or_else(|| anyhow!("unknown socket handle: {h}"))
+        })
+        .collect::<Result<_>>()?;
+    let mut items: Vec<zmq::PollItem> = socks
+        .iter()
+        .map(|s| s.as_poll_item(zmq::POLLIN | zmq::POLLOUT))
+        .collect();
+    zmq::poll(&mut items, timeout_ms)?;
+    let states: Vec<Value> = handles
+        .iter()
+        .zip(items.iter())
+        .map(|(h, it)| {
+            json!({
+                "handle": h,
+                "readable": it.is_readable(),
+                "writable": it.is_writable(),
+                "error": it.is_error(),
+            })
+        })
+        .collect();
+    Ok(json!({ "states": states }))
+}
+
 fn op_close(opts: Value) -> Result<Value> {
     let handle = req_u64(&opts, "handle")?;
     let removed = sockets().lock().remove(&handle).is_some();
     // Dropping the Socket closes it (libzmq zmq_close on Drop).
     Ok(json!({"ok": true, "closed": removed}))
+}
+
+// ── dynamic endpoint management ──────────────────────────────────────────────
+
+fn op_bind(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let endpoint = req_str(&opts, "endpoint")?.to_string();
+    with_socket(handle, |s| {
+        s.bind(&endpoint)?;
+        // After bind to a wildcard port (tcp://*:0) the concrete endpoint is
+        // only knowable via LAST_ENDPOINT — surface it so callers can dial in.
+        let bound = match s.get_last_endpoint()? {
+            Ok(ep) => ep,
+            Err(b) => hex_encode(&b),
+        };
+        Ok(json!({"ok": true, "endpoint": bound}))
+    })
+}
+
+fn op_connect(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let endpoint = req_str(&opts, "endpoint")?.to_string();
+    with_socket(handle, |s| {
+        s.connect(&endpoint)?;
+        Ok(json!({"ok": true}))
+    })
+}
+
+fn op_unbind(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let endpoint = req_str(&opts, "endpoint")?.to_string();
+    with_socket(handle, |s| {
+        s.unbind(&endpoint)?;
+        Ok(json!({"ok": true}))
+    })
+}
+
+fn op_disconnect(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let endpoint = req_str(&opts, "endpoint")?.to_string();
+    with_socket(handle, |s| {
+        s.disconnect(&endpoint)?;
+        Ok(json!({"ok": true}))
+    })
+}
+
+// ── socket event monitoring ──────────────────────────────────────────────────
+
+/// Map a monitor event-name to its libzmq `ZMQ_EVENT_*` flag.
+fn event_flag(name: &str) -> Result<i32> {
+    use zmq::SocketEvent::*;
+    Ok(match name.to_ascii_lowercase().as_str() {
+        "connected" => CONNECTED as i32,
+        "connect_delayed" => CONNECT_DELAYED as i32,
+        "connect_retried" => CONNECT_RETRIED as i32,
+        "listening" => LISTENING as i32,
+        "bind_failed" => BIND_FAILED as i32,
+        "accepted" => ACCEPTED as i32,
+        "accept_failed" => ACCEPT_FAILED as i32,
+        "closed" => CLOSED as i32,
+        "close_failed" => CLOSE_FAILED as i32,
+        "disconnected" => DISCONNECTED as i32,
+        "monitor_stopped" => MONITOR_STOPPED as i32,
+        "handshake_failed_no_detail" => HANDSHAKE_FAILED_NO_DETAIL as i32,
+        "handshake_succeeded" => HANDSHAKE_SUCCEEDED as i32,
+        "handshake_failed_protocol" => HANDSHAKE_FAILED_PROTOCOL as i32,
+        "handshake_failed_auth" => HANDSHAKE_FAILED_AUTH as i32,
+        "all" => ALL as i32,
+        other => return Err(anyhow!("unknown monitor event: {other}")),
+    })
+}
+
+/// Lowercase name for a raw monitor event id (inverse of `event_flag`).
+fn event_name(raw: u16) -> &'static str {
+    use zmq::SocketEvent::*;
+    match zmq::SocketEvent::from_raw(raw) {
+        CONNECTED => "connected",
+        CONNECT_DELAYED => "connect_delayed",
+        CONNECT_RETRIED => "connect_retried",
+        LISTENING => "listening",
+        BIND_FAILED => "bind_failed",
+        ACCEPTED => "accepted",
+        ACCEPT_FAILED => "accept_failed",
+        CLOSED => "closed",
+        CLOSE_FAILED => "close_failed",
+        DISCONNECTED => "disconnected",
+        MONITOR_STOPPED => "monitor_stopped",
+        HANDSHAKE_FAILED_NO_DETAIL => "handshake_failed_no_detail",
+        HANDSHAKE_SUCCEEDED => "handshake_succeeded",
+        HANDSHAKE_FAILED_PROTOCOL => "handshake_failed_protocol",
+        HANDSHAKE_FAILED_AUTH => "handshake_failed_auth",
+        ALL => "all",
+    }
+}
+
+/// Attach an event monitor to a socket. libzmq publishes lifecycle events to
+/// an inproc PAIR `endpoint`; the caller then creates a PAIR socket connected
+/// there and drains them with `monitor_recv`. `events` is a name, an array of
+/// names, or omitted (defaults to "all").
+fn op_monitor(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let endpoint = req_str(&opts, "endpoint")?.to_string();
+    let mask = match opts.get("events") {
+        None | Some(Value::Null) => zmq::SocketEvent::ALL as i32,
+        Some(Value::String(s)) => event_flag(s)?,
+        Some(Value::Array(a)) => {
+            let mut m = 0;
+            for v in a {
+                m |= event_flag(
+                    v.as_str()
+                        .ok_or_else(|| anyhow!("event must be a string"))?,
+                )?;
+            }
+            m
+        }
+        Some(_) => return Err(anyhow!("events must be a string or array of strings")),
+    };
+    with_socket(handle, |s| {
+        s.monitor(&endpoint, mask)?;
+        Ok(json!({"ok": true, "endpoint": endpoint}))
+    })
+}
+
+/// Receive and decode one monitor event from a PAIR socket connected to a
+/// monitor endpoint. The wire format is two frames: a 6-byte
+/// (u16 event, u32 value) header and the affected endpoint string.
+fn op_monitor_recv(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let timeout_ms = opts.get("timeout_ms").and_then(Value::as_i64);
+    or_timeout(with_socket(handle, |s| {
+        if let Some(t) = timeout_ms {
+            s.set_rcvtimeo(t as i32)?;
+        }
+        let frames = s.recv_multipart(0)?;
+        let hdr = frames
+            .first()
+            .ok_or_else(|| anyhow!("monitor event missing header frame"))?;
+        if hdr.len() < 6 {
+            return Err(anyhow!("monitor header frame too short"));
+        }
+        let event = u16::from_le_bytes([hdr[0], hdr[1]]);
+        let value = u32::from_le_bytes([hdr[2], hdr[3], hdr[4], hdr[5]]);
+        let endpoint = frames
+            .get(1)
+            .map(|f| String::from_utf8_lossy(f).into_owned())
+            .unwrap_or_default();
+        Ok(json!({
+            "event": event_name(event),
+            "event_id": event,
+            "value": value,
+            "endpoint": endpoint,
+        }))
+    }))
+}
+
+// ── proxy device ─────────────────────────────────────────────────────────────
+
+/// Run a `zmq_proxy` device on a background thread. Consumes the `frontend`
+/// and `backend` handles (removed from the registry and moved into the
+/// thread). Optional `capture` mirrors all traffic to a third socket;
+/// optional `control` makes it a steerable proxy (PAUSE/RESUME/TERMINATE).
+/// The proxy blocks its thread until the context terminates or a steerable
+/// TERMINATE arrives, so it must run off the calling thread.
+fn op_proxy(opts: Value) -> Result<Value> {
+    let mut fe = take_socket(req_u64(&opts, "frontend")?)?;
+    let mut be = take_socket(req_u64(&opts, "backend")?)?;
+    let mut capture = match opts.get("capture").and_then(Value::as_u64) {
+        Some(h) => Some(take_socket(h)?),
+        None => None,
+    };
+    let mut control = match opts.get("control").and_then(Value::as_u64) {
+        Some(h) => Some(take_socket(h)?),
+        None => None,
+    };
+    std::thread::spawn(move || {
+        let _ = match (&mut capture, &mut control) {
+            (None, None) => zmq::proxy(&fe, &be),
+            (Some(cap), None) => zmq::proxy_with_capture(&mut fe, &mut be, cap),
+            (None, Some(ctl)) => zmq::proxy_steerable(&mut fe, &mut be, ctl),
+            (Some(cap), Some(ctl)) => zmq::proxy_steerable_with_capture(&mut fe, &mut be, cap, ctl),
+        };
+    });
+    Ok(json!({"ok": true, "running": true}))
+}
+
+// ── security / codec / introspection ─────────────────────────────────────────
+
+/// Generate a fresh CURVE keypair as a pair of 40-char z85 strings.
+fn op_curve_keypair(_opts: Value) -> Result<Value> {
+    let kp = zmq::CurveKeyPair::new().map_err(|e| anyhow!("{e}"))?;
+    let public = zmq::z85_encode(&kp.public_key).map_err(|e| anyhow!("{e}"))?;
+    let secret = zmq::z85_encode(&kp.secret_key).map_err(|e| anyhow!("{e}"))?;
+    Ok(json!({"public": public, "secret": secret}))
+}
+
+fn op_z85_encode(opts: Value) -> Result<Value> {
+    let bytes = payload_to_bytes(&opts, req_str(&opts, "data")?)?;
+    let z = zmq::z85_encode(&bytes).map_err(|e| anyhow!("{e}"))?;
+    Ok(json!({"z85": z}))
+}
+
+fn op_z85_decode(opts: Value) -> Result<Value> {
+    let bytes = zmq::z85_decode(req_str(&opts, "z85")?).map_err(|e| anyhow!("{e}"))?;
+    // Echo the bytes back in whatever encoding the caller asked for (hex by
+    // default would be safest, but keep utf8 default for symmetry with send).
+    Ok(json!({"data": bytes_to_payload(&opts, &bytes)?, "bytes": bytes.len()}))
+}
+
+/// Vendored libzmq version as `{major,minor,patch,version}`.
+fn op_lib_version(_opts: Value) -> Result<Value> {
+    let (major, minor, patch) = zmq::version();
+    Ok(json!({
+        "major": major,
+        "minor": minor,
+        "patch": patch,
+        "version": format!("{major}.{minor}.{patch}"),
+    }))
+}
+
+/// Probe an optional libzmq capability ("curve", "gssapi", "ipc", "pgm",
+/// "tipc", "norm", "draft"). Returns `{capability, has}` — `has` is null if
+/// the running libzmq is too old to answer.
+fn op_has(opts: Value) -> Result<Value> {
+    let cap = req_str(&opts, "capability")?;
+    Ok(json!({"capability": cap, "has": zmq::has(cap)}))
 }
 
 /// One-shot REQ round-trip convenience: connect a fresh ephemeral REQ
@@ -311,7 +860,7 @@ fn op_close(opts: Value) -> Result<Value> {
 /// `socket` handle.
 fn op_request(opts: Value) -> Result<Value> {
     let endpoint = req_str(&opts, "endpoint")?;
-    let data = req_str(&opts, "data")?;
+    let bytes = payload_to_bytes(&opts, req_str(&opts, "data")?)?;
     let timeout_ms = opts
         .get("timeout_ms")
         .and_then(Value::as_i64)
@@ -321,10 +870,10 @@ fn op_request(opts: Value) -> Result<Value> {
     sock.set_sndtimeo(timeout_ms as i32)?;
     sock.set_linger(0)?;
     sock.connect(endpoint)?;
-    sock.send(data.as_bytes(), 0)?;
+    sock.send(&bytes, 0)?;
     match sock.recv_bytes(0) {
         Ok(bytes) => Ok(json!({
-            "reply": String::from_utf8_lossy(&bytes),
+            "reply": bytes_to_payload(&opts, &bytes)?,
             "bytes": bytes.len(),
         })),
         Err(zmq::Error::EAGAIN) => Ok(json!({"timeout": true})),
@@ -379,65 +928,46 @@ pub unsafe extern "C" fn stryke_free_cstring(p: *mut c_char) {
 
 // ── exports ─────────────────────────────────────────────────────────────────
 
+/// Declare a `#[no_mangle]` FFI export that forwards to an `op_*` handler.
+macro_rules! export {
+    ($name:ident => $handler:path) => {
+        #[no_mangle]
+        pub extern "C" fn $name(args: *const c_char) -> *const c_char {
+            ffi_call(args, $handler)
+        }
+    };
+}
+
 #[no_mangle]
 pub extern "C" fn zmq__pkg_version(args: *const c_char) -> *const c_char {
     ffi_call(args, |_| Ok(json!({"version": env!("CARGO_PKG_VERSION")})))
 }
 
-#[no_mangle]
-pub extern "C" fn zmq__socket(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_socket)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__send(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_send)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__send_multipart(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_send_multipart)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__recv(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_recv)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__recv_multipart(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_recv_multipart)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__subscribe(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_subscribe)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__unsubscribe(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_unsubscribe)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__set(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_set)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__poll(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_poll)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__close(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_close)
-}
-
-#[no_mangle]
-pub extern "C" fn zmq__request(args: *const c_char) -> *const c_char {
-    ffi_call(args, op_request)
-}
+export!(zmq__socket => op_socket);
+export!(zmq__send => op_send);
+export!(zmq__send_multipart => op_send_multipart);
+export!(zmq__recv => op_recv);
+export!(zmq__recv_multipart => op_recv_multipart);
+export!(zmq__subscribe => op_subscribe);
+export!(zmq__unsubscribe => op_unsubscribe);
+export!(zmq__set => op_set);
+export!(zmq__get => op_get);
+export!(zmq__poll => op_poll);
+export!(zmq__poll_many => op_poll_many);
+export!(zmq__close => op_close);
+export!(zmq__bind => op_bind);
+export!(zmq__connect => op_connect);
+export!(zmq__unbind => op_unbind);
+export!(zmq__disconnect => op_disconnect);
+export!(zmq__monitor => op_monitor);
+export!(zmq__monitor_recv => op_monitor_recv);
+export!(zmq__proxy => op_proxy);
+export!(zmq__curve_keypair => op_curve_keypair);
+export!(zmq__z85_encode => op_z85_encode);
+export!(zmq__z85_decode => op_z85_decode);
+export!(zmq__lib_version => op_lib_version);
+export!(zmq__has => op_has);
+export!(zmq__request => op_request);
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -641,5 +1171,208 @@ mod tests {
         assert_eq!(got["data"], "work");
         call(zmq__close, &format!(r#"{{"handle":{ph}}}"#));
         call(zmq__close, &format!(r#"{{"handle":{xh}}}"#));
+    }
+
+    // ── new-surface coverage ─────────────────────────────────────────────────
+
+    /// hex/base64 inline codecs must round-trip arbitrary bytes including a
+    /// NUL and high bytes that `from_utf8_lossy` would corrupt. Pins the
+    /// binary-safe framing the default utf8 path can't provide.
+    #[test]
+    fn binary_codecs_round_trip() {
+        let raw = [0u8, 1, 2, 255, 254, 128, b'z'];
+        assert_eq!(hex_decode(&hex_encode(&raw)).unwrap(), raw);
+        assert_eq!(base64_decode(&base64_encode(&raw)).unwrap(), raw);
+        // Known vectors against the public encodings.
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+    }
+
+    /// A hex-framed send must arrive byte-identical when recv'd hex-framed —
+    /// the end-to-end binary-safe path through real libzmq sockets. A payload
+    /// with an embedded NUL would be truncated by any C-string path.
+    #[test]
+    fn hex_encoded_send_recv_is_binary_safe() {
+        let ep = "inproc://stryke-zmq-test-binary";
+        let srv = call(zmq__socket, &format!(r#"{{"type":"pair","bind":"{ep}"}}"#));
+        let cli = call(
+            zmq__socket,
+            &format!(r#"{{"type":"pair","connect":"{ep}"}}"#),
+        );
+        let sh = srv["handle"].as_u64().unwrap();
+        let ch = cli["handle"].as_u64().unwrap();
+        // bytes [0,255,0,42] — has a NUL and a high byte.
+        call(
+            zmq__send,
+            &format!(r#"{{"handle":{ch},"data":"00ff002a","encoding":"hex"}}"#),
+        );
+        let got = call(
+            zmq__recv,
+            &format!(r#"{{"handle":{sh},"timeout_ms":1000,"encoding":"hex"}}"#),
+        );
+        assert_eq!(
+            got["data"], "00ff002a",
+            "binary payload must survive intact"
+        );
+        assert_eq!(got["bytes"], 4);
+        call(zmq__close, &format!(r#"{{"handle":{sh}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{ch}}}"#));
+    }
+
+    /// `get` must read back an option that `set` (or socket creation) wrote.
+    /// Round-trips an i32 (sndhwm) and the socket type to pin the get table.
+    #[test]
+    fn set_then_get_round_trips_option() {
+        let s = call(
+            zmq__socket,
+            r#"{"type":"pub","sndhwm":4242,"bind":"inproc://stryke-zmq-test-getopt"}"#,
+        );
+        let h = s["handle"].as_u64().unwrap();
+        let hwm = call(zmq__get, &format!(r#"{{"handle":{h},"opt":"sndhwm"}}"#));
+        assert_eq!(hwm["value"], 4242, "creation-time option must be readable");
+        let ty = call(zmq__get, &format!(r#"{{"handle":{h},"opt":"type"}}"#));
+        assert_eq!(ty["value"], "pub");
+        call(
+            zmq__set,
+            &format!(r#"{{"handle":{h},"opt":"linger","value":17}}"#),
+        );
+        let lg = call(zmq__get, &format!(r#"{{"handle":{h},"opt":"linger"}}"#));
+        assert_eq!(lg["value"], 17, "set must be observable via get");
+        call(zmq__close, &format!(r#"{{"handle":{h}}}"#));
+    }
+
+    /// `bind` to a wildcard TCP port must return the concrete endpoint via
+    /// LAST_ENDPOINT so a caller can hand the port to a peer. Pins the
+    /// dynamic-bind discovery path.
+    #[test]
+    fn dynamic_bind_reports_concrete_endpoint() {
+        let s = call(zmq__socket, r#"{"type":"rep"}"#);
+        let h = s["handle"].as_u64().unwrap();
+        let b = call(
+            zmq__bind,
+            &format!(r#"{{"handle":{h},"endpoint":"tcp://127.0.0.1:*"}}"#),
+        );
+        let ep = b["endpoint"].as_str().unwrap();
+        assert!(
+            ep.starts_with("tcp://127.0.0.1:") && !ep.ends_with(":*"),
+            "wildcard bind must resolve to a concrete port; got {ep}"
+        );
+        call(zmq__close, &format!(r#"{{"handle":{h}}}"#));
+    }
+
+    /// `poll_many` over two idle sockets must report neither readable, and
+    /// must echo each handle back — pins the multi-socket poll wiring.
+    #[test]
+    fn poll_many_reports_per_handle_state() {
+        let a = call(
+            zmq__socket,
+            r#"{"type":"pull","bind":"inproc://stryke-zmq-pm-a"}"#,
+        );
+        let b = call(
+            zmq__socket,
+            r#"{"type":"pull","bind":"inproc://stryke-zmq-pm-b"}"#,
+        );
+        let ah = a["handle"].as_u64().unwrap();
+        let bh = b["handle"].as_u64().unwrap();
+        let r = call(
+            zmq__poll_many,
+            &format!(r#"{{"handles":[{ah},{bh}],"timeout_ms":50}}"#),
+        );
+        let states = r["states"].as_array().unwrap();
+        assert_eq!(states.len(), 2);
+        assert_eq!(states[0]["handle"], ah);
+        assert_eq!(states[0]["readable"], false);
+        assert_eq!(states[1]["handle"], bh);
+        call(zmq__close, &format!(r#"{{"handle":{ah}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{bh}}}"#));
+    }
+
+    /// `curve_keypair` must yield two distinct 40-char z85 keys, and `z85`
+    /// encode/decode must round-trip. Pins the security + codec exports
+    /// without needing a CURVE handshake.
+    #[test]
+    fn curve_keypair_and_z85_round_trip() {
+        // CURVE keypair generation needs libsodium compiled into libzmq; the
+        // vendored build may omit it. Gate the keypair assertions on the
+        // runtime capability so the test reflects the actual build, while z85
+        // (libzmq core, always present) is exercised unconditionally.
+        if zmq::has("curve") == Some(true) {
+            let kp = call(zmq__curve_keypair, "{}");
+            let public = kp["public"].as_str().expect("curve public key");
+            let secret = kp["secret"].as_str().expect("curve secret key");
+            assert_eq!(public.len(), 40, "z85 public key is 40 chars");
+            assert_eq!(secret.len(), 40, "z85 secret key is 40 chars");
+            assert_ne!(public, secret);
+        } else {
+            // Without CURVE the op must surface an error, never panic/null.
+            let kp = call(zmq__curve_keypair, "{}");
+            assert!(
+                kp.get("error").is_some(),
+                "no-CURVE build must report error"
+            );
+        }
+        let enc = call(zmq__z85_encode, r#"{"data":"deadbeef","encoding":"hex"}"#);
+        let z = enc["z85"].as_str().unwrap();
+        let dec = call(
+            zmq__z85_decode,
+            &format!(r#"{{"z85":"{z}","encoding":"hex"}}"#),
+        );
+        assert_eq!(dec["data"], "deadbeef", "z85 must round-trip the bytes");
+    }
+
+    /// `lib_version` reports a libzmq ≥ 4 (the vendored zeromq-src is 4.x),
+    /// and `has("curve")` answers a bool — pins the introspection exports.
+    #[test]
+    fn lib_version_and_has_report() {
+        let v = call(zmq__lib_version, "{}");
+        assert!(v["major"].as_i64().unwrap() >= 4, "vendored libzmq is 4.x+");
+        let h = call(zmq__has, r#"{"capability":"curve"}"#);
+        assert_eq!(h["capability"], "curve");
+        assert!(h["has"].is_boolean() || h["has"].is_null());
+    }
+
+    /// A socket monitor must deliver a `listening` event when its target
+    /// binds. Drives the monitor → PAIR-reader → `monitor_recv` decode path
+    /// end to end. The monitor must be attached before the bind that triggers
+    /// the event.
+    #[test]
+    fn monitor_observes_listening_event() {
+        let s = call(zmq__socket, r#"{"type":"rep"}"#);
+        let h = s["handle"].as_u64().unwrap();
+        let mon_ep = "inproc://stryke-zmq-test-monitor";
+        call(
+            zmq__monitor,
+            &format!(r#"{{"handle":{h},"endpoint":"{mon_ep}","events":"all"}}"#),
+        );
+        let reader = call(
+            zmq__socket,
+            &format!(r#"{{"type":"pair","connect":"{mon_ep}"}}"#),
+        );
+        let rh = reader["handle"].as_u64().unwrap();
+        // Trigger an event by binding the monitored socket.
+        call(
+            zmq__bind,
+            &format!(r#"{{"handle":{h},"endpoint":"tcp://127.0.0.1:*"}}"#),
+        );
+        // Drain until we see "listening" or time out.
+        let mut saw_listening = false;
+        for _ in 0..10 {
+            let ev = call(
+                zmq__monitor_recv,
+                &format!(r#"{{"handle":{rh},"timeout_ms":500}}"#),
+            );
+            if ev.get("timeout").and_then(Value::as_bool) == Some(true) {
+                break;
+            }
+            if ev["event"] == "listening" {
+                saw_listening = true;
+                break;
+            }
+        }
+        assert!(saw_listening, "monitor must report the listening event");
+        call(zmq__close, &format!(r#"{{"handle":{rh}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{h}}}"#));
     }
 }

@@ -151,16 +151,22 @@ val $reply = Zmq::request("tcp://localhost:5555", "hello", timeout_ms =&gt; 2000
         <h2>API</h2>
         <table class="example-tbl">
           <tbody>
-            <tr><td>Zmq::version()</td><td>package version string</td></tr>
-            <tr><td>Zmq::socket($type, %opts)</td><td>create socket, return integer handle. type: <code>req rep pub sub push pull dealer router pair xpub xsub stream</code>. opts: bind, connect, subscribe, sndhwm, rcvhwm, linger, sndtimeo, rcvtimeo, identity, conflate</td></tr>
+            <tr><td>Zmq::version() / Zmq::lib_version()</td><td>package version; vendored libzmq <code>{ major, minor, patch }</code></td></tr>
+            <tr><td>Zmq::has($capability)</td><td>probe <code>curve gssapi ipc pgm tipc norm draft</code></td></tr>
+            <tr><td>Zmq::socket($type, %opts)</td><td>create socket, return integer handle. type: <code>req rep pub sub push pull dealer router pair xpub xsub stream</code>. opts: bind, connect, subscribe + any settable option</td></tr>
             <tr><td>Zmq::close($handle)</td><td>close + remove the socket</td></tr>
-            <tr><td>Zmq::send($handle, $data, %opts)</td><td>send a frame; <code>more =&gt; 1</code> for multipart continuation</td></tr>
-            <tr><td>Zmq::send_multipart($handle, $parts)</td><td>send an arrayref of frames atomically</td></tr>
-            <tr><td>Zmq::recv($handle, %opts)</td><td>receive a frame; <code>timeout_ms</code> opt, returns undef on timeout</td></tr>
+            <tr><td>Zmq::bind / connect / unbind / disconnect ($handle, $endpoint)</td><td>dynamic endpoint management; <code>bind</code> returns the resolved endpoint</td></tr>
+            <tr><td>Zmq::send($handle, $data, %opts)</td><td>send a frame; <code>more =&gt; 1</code>; <code>encoding =&gt; utf8|hex|base64</code></td></tr>
+            <tr><td>Zmq::send_multipart($handle, $parts, %opts)</td><td>send an arrayref of frames atomically; <code>encoding</code> opt</td></tr>
+            <tr><td>Zmq::recv($handle, %opts)</td><td>receive a frame; <code>timeout_ms</code>, <code>encoding</code>; returns undef on timeout</td></tr>
             <tr><td>Zmq::recv_multipart($handle, %opts)</td><td>receive all frames of a message as a list</td></tr>
             <tr><td>Zmq::subscribe / unsubscribe ($handle, $topic)</td><td>SUB topic filter (<code>""</code> = all)</td></tr>
-            <tr><td>Zmq::set($handle, $opt, $value)</td><td>set a socket option after creation</td></tr>
+            <tr><td>Zmq::set / get ($handle, $opt[, $value])</td><td>full socket-option table: timeouts, buffers, hwm, tcp_keepalive*, heartbeat*, CURVE keys, plain auth, identity&hellip;</td></tr>
             <tr><td>Zmq::poll($handle, %opts)</td><td>readiness probe, returns <code>{ readable, writable }</code></td></tr>
+            <tr><td>Zmq::poll_many($handles, %opts)</td><td>one <code>zmq_poll</code> over many handles</td></tr>
+            <tr><td>Zmq::monitor / monitor_recv ($handle, &hellip;)</td><td>socket lifecycle event stream over an inproc PAIR</td></tr>
+            <tr><td>Zmq::proxy($frontend, $backend, %opts)</td><td>backgrounded <code>zmq_proxy</code> device; <code>capture</code>, <code>control</code> opts</td></tr>
+            <tr><td>Zmq::curve_keypair() / z85_encode / z85_decode</td><td>CURVE keypair (needs libsodium) + z85 codec</td></tr>
             <tr><td>Zmq::request($endpoint, $data, %opts)</td><td>one-shot REQ round-trip; returns reply or undef on timeout</td></tr>
           </tbody>
         </table>
