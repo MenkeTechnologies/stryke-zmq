@@ -966,6 +966,32 @@ fn op_topic_match(opts: Value) -> Result<Value> {
     Ok(json!({"subscription": sub, "topic": topic, "match": matched}))
 }
 
+/// ZeroMQ XPUB routing: which of a set of `subscriptions` match a `topic`. A
+/// subscription matches when it is a byte-prefix of the topic (an empty
+/// subscription matches everything), exactly as `topic_match` does for one — this
+/// is the set form a publisher uses to decide which subscribers receive a
+/// message. opts: `topic` (required), `subscriptions` (array of strings).
+/// Returns `{topic, match, matched}` where `match` is true if any subscription
+/// matched and `matched` lists them in input order. Pure.
+fn op_topic_match_any(opts: Value) -> Result<Value> {
+    let topic = req_str(&opts, "topic")?;
+    let subs = opts
+        .get("subscriptions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing subscriptions (array of strings)"))?;
+    let matched: Vec<Value> = subs
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|s| topic.as_bytes().starts_with(s.as_bytes()))
+        .map(|s| json!(s))
+        .collect();
+    Ok(json!({
+        "topic": topic,
+        "match": !matched.is_empty(),
+        "matched": matched,
+    }))
+}
+
 /// Validate a socket-type name, returning its canonical lowercase form (so
 /// aliases like `publish` collapse to `pub`). Never errors — reports validity.
 fn op_valid_socket_type(opts: Value) -> Result<Value> {
@@ -1133,6 +1159,7 @@ export!(zmq__request => op_request);
 export!(zmq__parse_endpoint => op_parse_endpoint);
 export!(zmq__build_endpoint => op_build_endpoint);
 export!(zmq__topic_match => op_topic_match);
+export!(zmq__topic_match_any => op_topic_match_any);
 export!(zmq__valid_socket_type => op_valid_socket_type);
 export!(zmq__socket_peers => op_socket_peers);
 export!(zmq__socket_caps => op_socket_caps);
@@ -1648,6 +1675,44 @@ mod tests {
             r#"{"subscription":"","topic":"anything"}"#,
         );
         assert_eq!(all["match"], json!(true), "empty subscription matches all");
+    }
+
+    #[test]
+    fn topic_match_any_returns_all_matching_subscriptions() {
+        // Two of three subscriptions are prefixes of the topic.
+        let v = call(
+            zmq__topic_match_any,
+            r#"{"topic":"weather.us.ny","subscriptions":["weather.","sports.","weather.us"]}"#,
+        );
+        assert_eq!(v["match"], json!(true));
+        assert_eq!(
+            v["matched"],
+            json!(["weather.", "weather.us"]),
+            "matches kept in input order"
+        );
+        // No subscription is a prefix → no match, empty list.
+        let none = call(
+            zmq__topic_match_any,
+            r#"{"topic":"news.today","subscriptions":["weather.","sports."]}"#,
+        );
+        assert_eq!(none["match"], json!(false));
+        assert_eq!(none["matched"], json!([]));
+        // An empty subscription in the set matches everything.
+        let all = call(
+            zmq__topic_match_any,
+            r#"{"topic":"anything","subscriptions":["x",""]}"#,
+        );
+        assert_eq!(all["match"], json!(true));
+        assert_eq!(all["matched"], json!([""]));
+        // Empty subscription set never matches.
+        assert_eq!(
+            call(zmq__topic_match_any, r#"{"topic":"t","subscriptions":[]}"#)["match"],
+            json!(false)
+        );
+        // Missing subscriptions errors.
+        assert!(err_of(&call(zmq__topic_match_any, r#"{"topic":"t"}"#))
+            .to_lowercase()
+            .contains("subscriptions"));
     }
 
     #[test]

@@ -166,6 +166,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::parse_endpoint($endpoint)` | hashref | `{ transport, address, known_transport, host?, port? }` — no socket |
 | `Zmq::build_endpoint(%opts)` | hashref | `{ endpoint, known_transport }` — inverse of parse_endpoint; opts: transport, address \| host + port |
 | `Zmq::topic_match($subscription, $topic)` | 1 \| "" | ZMQ SUB prefix match (empty subscription matches all) |
+| `Zmq::topic_match_any($topic, \@subscriptions)` | `{ topic, match, matched }` | XPUB set routing: which subscriptions prefix-match the topic (in input order) |
 | `Zmq::valid_socket_type($type)` | hashref | `{ valid, canonical }` — aliases collapse (`publish` → `pub`) |
 | `Zmq::socket_peers($type)` | list | socket types `$type` can validly connect to (ZMQ messaging-pattern compatibility) |
 | `Zmq::socket_caps($type)` | `{ type, pattern, can_send, can_recv }` | messaging pattern + send/recv directionality (PUB send-only, SUB recv-only, …) |

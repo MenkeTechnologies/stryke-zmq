@@ -113,6 +113,14 @@ assert_eq Zmq::topic_match("weather.", "weather.us.ny"), 1, "topic_match: prefix
 assert_eq Zmq::topic_match("sports.", "weather.us"),     0, "topic_match: non-prefix fails"
 assert_eq Zmq::topic_match("", "anything"),              1, "topic_match: empty matches all"
 
+# topic_match_any: XPUB set routing — which subscriptions match a topic.
+val $tm = Zmq::topic_match_any("weather.us.ny", ["weather.", "sports.", "weather.us"])
+assert_eq $tm->{match}, 1,                          "topic_match_any: at least one matched"
+assert_eq join(",", @{ $tm->{matched} }), "weather.,weather.us", "topic_match_any: all matches, input order"
+assert_eq Zmq::topic_match_any("news.today", ["weather.", "sports."])->{match}, 0, "topic_match_any: no prefix matches"
+assert_eq Zmq::topic_match_any("anything", ["x", ""])->{matched}[0], "", "topic_match_any: empty subscription matches all"
+assert_eq Zmq::topic_match_any("t", [])->{match}, 0, "topic_match_any: empty set never matches"
+
 val $vt = Zmq::valid_socket_type("PUBLISH")
 assert_ok $vt->{valid},               "valid_socket_type: alias is valid"
 assert_eq $vt->{canonical}, "pub",    "valid_socket_type: canonicalizes"

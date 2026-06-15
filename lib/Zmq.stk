@@ -283,6 +283,15 @@ fn Zmq::topic_match ($subscription, $topic) {
         zmq__topic_match(to_json({ subscription => $subscription, topic => $topic })))->{match}
 }
 
+## Which of \@subscriptions match $topic (the set form a publisher uses to route
+## a message under ZMQ XPUB). A subscription matches when it is a byte-prefix of
+## the topic. Returns a hashref { topic, match, matched } where match is true if
+## any matched and matched lists them in input order.
+fn Zmq::topic_match_any ($topic, $subscriptions) {
+    Zmq::_decode("topic_match_any",
+        zmq__topic_match_any(to_json({ topic => $topic, subscriptions => $subscriptions })))
+}
+
 ## Validate a socket-type name → { valid, canonical }. Aliases (e.g.
 ## "publish") collapse to their canonical form ("pub").
 fn Zmq::valid_socket_type ($type) {
