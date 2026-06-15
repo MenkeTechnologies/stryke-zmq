@@ -1002,6 +1002,39 @@ fn op_socket_peers(opts: Value) -> Result<Value> {
     Ok(json!({"type": canonical, "peers": peers}))
 }
 
+/// Classify a socket type by its ZeroMQ messaging `pattern` and report its
+/// `can_send`/`can_recv` directionality, per `zmq_socket(3)`. PUB/PUSH are
+/// send-only, SUB/PULL receive-only, XPUB/XSUB bidirectional; the request-reply,
+/// exclusive-pair, and native-stream types send and receive. Lets you check
+/// whether `zmq_send`/`zmq_recv` is even legal on a socket before wiring it.
+/// The input is canonicalized (aliases accepted). Pure.
+fn op_socket_caps(opts: Value) -> Result<Value> {
+    let name = req_str(&opts, "type")?;
+    let ty = parse_socket_type(name)?;
+    let canonical = socket_type_name(ty);
+    let (pattern, can_send, can_recv) = match canonical {
+        "req" | "rep" | "dealer" | "router" => ("request-reply", true, true),
+        "pub" => ("publish-subscribe", true, false),
+        "sub" => ("publish-subscribe", false, true),
+        "xpub" | "xsub" => ("publish-subscribe", true, true),
+        "push" => ("pipeline", true, false),
+        "pull" => ("pipeline", false, true),
+        "pair" => ("exclusive-pair", true, true),
+        "stream" => ("native", true, true),
+        other => {
+            return Err(anyhow::anyhow!(
+                "no capability rule for socket type `{other}`"
+            ))
+        }
+    };
+    Ok(json!({
+        "type": canonical,
+        "pattern": pattern,
+        "can_send": can_send,
+        "can_recv": can_recv,
+    }))
+}
+
 /// Every canonical socket-type name this package accepts.
 fn op_socket_types(_opts: Value) -> Result<Value> {
     Ok(json!({"types": [
@@ -1102,6 +1135,7 @@ export!(zmq__build_endpoint => op_build_endpoint);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__valid_socket_type => op_valid_socket_type);
 export!(zmq__socket_peers => op_socket_peers);
+export!(zmq__socket_caps => op_socket_caps);
 export!(zmq__socket_types => op_socket_types);
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -1688,6 +1722,60 @@ mod tests {
         }
         // Unknown socket type errors.
         assert!(err_of(&call(zmq__socket_peers, r#"{"type":"nope"}"#))
+            .to_lowercase()
+            .contains("socket"));
+    }
+
+    #[test]
+    fn socket_caps_reports_pattern_and_directionality() {
+        // PUB is send-only, SUB receive-only — the asymmetric pub/sub pair.
+        let pubc = call(zmq__socket_caps, r#"{"type":"pub"}"#);
+        assert_eq!(pubc["pattern"], json!("publish-subscribe"));
+        assert_eq!(pubc["can_send"], json!(true));
+        assert_eq!(pubc["can_recv"], json!(false));
+        let subc = call(zmq__socket_caps, r#"{"type":"sub"}"#);
+        assert_eq!(subc["can_send"], json!(false));
+        assert_eq!(subc["can_recv"], json!(true));
+        // PUSH/PULL pipeline directionality mirrors PUB/SUB.
+        assert_eq!(
+            call(zmq__socket_caps, r#"{"type":"push"}"#)["can_recv"],
+            json!(false)
+        );
+        assert_eq!(
+            call(zmq__socket_caps, r#"{"type":"pull"}"#)["can_send"],
+            json!(false)
+        );
+        // X variants and request-reply / pair / stream are bidirectional.
+        for ty in [
+            "xpub", "xsub", "req", "rep", "dealer", "router", "pair", "stream",
+        ] {
+            let c = call(zmq__socket_caps, &format!(r#"{{"type":"{ty}"}}"#));
+            assert_eq!(c["can_send"], json!(true), "{ty} can send");
+            assert_eq!(c["can_recv"], json!(true), "{ty} can recv");
+        }
+        // Pattern names and alias canonicalization.
+        assert_eq!(
+            call(zmq__socket_caps, r#"{"type":"req"}"#)["pattern"],
+            json!("request-reply")
+        );
+        assert_eq!(
+            call(zmq__socket_caps, r#"{"type":"PUBLISH"}"#)["type"],
+            json!("pub")
+        );
+        assert_eq!(
+            call(zmq__socket_caps, r#"{"type":"stream"}"#)["pattern"],
+            json!("native")
+        );
+        // Every advertised socket type has a capability rule.
+        for ty in call(zmq__socket_types, "{}")["types"].as_array().unwrap() {
+            let c = call(
+                zmq__socket_caps,
+                &format!(r#"{{"type":"{}"}}"#, ty.as_str().unwrap()),
+            );
+            assert!(c["pattern"].is_string(), "{} has a pattern", ty);
+            assert!(c["can_send"] == json!(true) || c["can_recv"] == json!(true));
+        }
+        assert!(err_of(&call(zmq__socket_caps, r#"{"type":"nope"}"#))
             .to_lowercase()
             .contains("socket"));
     }

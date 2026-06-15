@@ -168,6 +168,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::topic_match($subscription, $topic)` | 1 \| "" | ZMQ SUB prefix match (empty subscription matches all) |
 | `Zmq::valid_socket_type($type)` | hashref | `{ valid, canonical }` — aliases collapse (`publish` → `pub`) |
 | `Zmq::socket_peers($type)` | list | socket types `$type` can validly connect to (ZMQ messaging-pattern compatibility) |
+| `Zmq::socket_caps($type)` | `{ type, pattern, can_send, can_recv }` | messaging pattern + send/recv directionality (PUB send-only, SUB recv-only, …) |
 | `Zmq::socket_types()` | list | every canonical socket-type name |
 
 The last four are pure helpers — string/validation utilities that create no

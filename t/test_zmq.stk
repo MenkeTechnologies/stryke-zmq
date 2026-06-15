@@ -129,4 +129,16 @@ assert_eq join(",", Zmq::socket_peers("push")), "pull",       "socket_peers: pus
 assert_eq join(",", Zmq::socket_peers("pair")), "pair",       "socket_peers: pair ↔ pair"
 assert_dies fn { Zmq::socket_peers("nope") }, "socket_peers: rejects an unknown socket type"
 
+# socket_caps: messaging pattern + send/recv directionality (zmq_socket(3)).
+val $pubc = Zmq::socket_caps("pub")
+assert_eq $pubc->{pattern},  "publish-subscribe", "socket_caps: pub pattern"
+assert_eq $pubc->{can_send}, 1,                   "socket_caps: pub is send-only (can_send)"
+assert_eq $pubc->{can_recv}, 0,                   "socket_caps: pub is send-only (can_recv false)"
+assert_eq Zmq::socket_caps("sub")->{can_send}, 0,   "socket_caps: sub is receive-only"
+assert_eq Zmq::socket_caps("push")->{can_recv}, 0,  "socket_caps: push is send-only"
+assert_eq Zmq::socket_caps("req")->{pattern},  "request-reply", "socket_caps: req is request-reply"
+assert_eq Zmq::socket_caps("xpub")->{can_recv}, 1, "socket_caps: xpub is bidirectional"
+assert_eq Zmq::socket_caps("PUBLISH")->{type}, "pub", "socket_caps: alias canonicalized"
+assert_dies fn { Zmq::socket_caps("nope") }, "socket_caps: rejects an unknown socket type"
+
 test_run

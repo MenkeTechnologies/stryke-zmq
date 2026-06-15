@@ -296,6 +296,14 @@ fn Zmq::socket_peers ($type) {
     @{ Zmq::_decode("socket_peers", zmq__socket_peers(to_json({ type => $type })))->{peers} }
 }
 
+## Classify $type by its ZeroMQ messaging pattern and report directionality.
+## Returns a hashref { type, pattern, can_send, can_recv } — e.g. PUB is
+## send-only, SUB receive-only. Lets you check whether send/recv is legal on a
+## socket before wiring it.
+fn Zmq::socket_caps ($type) {
+    Zmq::_decode("socket_caps", zmq__socket_caps(to_json({ type => $type })))
+}
+
 ## List of every canonical socket-type name this package accepts.
 fn Zmq::socket_types {
     @{ Zmq::_decode("socket_types", zmq__socket_types("{}"))->{types} }

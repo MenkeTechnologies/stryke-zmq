@@ -47,6 +47,7 @@ assert_ok exists &Zmq::build_endpoint, "Zmq::build_endpoint exists"
 assert_ok exists &Zmq::topic_match, "Zmq::topic_match exists"
 assert_ok exists &Zmq::valid_socket_type, "Zmq::valid_socket_type exists"
 assert_ok exists &Zmq::socket_peers, "Zmq::socket_peers exists"
+assert_ok exists &Zmq::socket_caps, "Zmq::socket_caps exists"
 assert_ok exists &Zmq::socket_types, "Zmq::socket_types exists"
 
 test_run
