@@ -919,6 +919,43 @@ fn op_parse_endpoint(opts: Value) -> Result<Value> {
     Ok(out)
 }
 
+/// Build a ZMQ endpoint string from parts — the inverse of `parse_endpoint`.
+/// opts: `transport` (required), and either `address`, or `host` + optional
+/// `port` for the IP transports (tcp/udp/ws/wss). Validates the transport name
+/// and rejects an empty host. Pure.
+fn op_build_endpoint(opts: Value) -> Result<Value> {
+    let transport = req_str(&opts, "transport")?;
+    if transport.is_empty() {
+        return Err(anyhow!("empty transport"));
+    }
+    let known = matches!(
+        transport,
+        "tcp" | "ipc" | "inproc" | "pgm" | "epgm" | "vmci" | "ws" | "wss" | "udp"
+    );
+    // An explicit `address` wins; otherwise assemble it from host[:port].
+    let address = if let Some(addr) = opts.get("address").and_then(Value::as_str) {
+        addr.to_string()
+    } else {
+        let host = opts
+            .get("host")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("missing address or host"))?;
+        if host.is_empty() {
+            return Err(anyhow!("empty host"));
+        }
+        // port may arrive as a number, the `*` bind wildcard, or be absent.
+        match opts.get("port") {
+            Some(Value::Number(n)) => format!("{host}:{n}"),
+            Some(Value::String(s)) if !s.is_empty() => format!("{host}:{s}"),
+            _ => host.to_string(),
+        }
+    };
+    Ok(json!({
+        "endpoint": format!("{transport}://{address}"),
+        "known_transport": known,
+    }))
+}
+
 /// ZeroMQ SUB/XSUB matching: a subscription matches a topic when it is a
 /// byte-prefix of it; an empty subscription matches everything. Mirrors
 /// libzmq's prefix filter without a socket.
@@ -1035,6 +1072,7 @@ export!(zmq__lib_version => op_lib_version);
 export!(zmq__has => op_has);
 export!(zmq__request => op_request);
 export!(zmq__parse_endpoint => op_parse_endpoint);
+export!(zmq__build_endpoint => op_build_endpoint);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__valid_socket_type => op_valid_socket_type);
 export!(zmq__socket_types => op_socket_types);
@@ -1483,6 +1521,53 @@ mod tests {
     fn parse_endpoint_rejects_missing_scheme() {
         let v = call(zmq__parse_endpoint, r#"{"endpoint":"127.0.0.1:5555"}"#);
         assert!(err_of(&v).contains("missing"), "no `://` must error");
+    }
+
+    #[test]
+    fn build_endpoint_inverts_parse_endpoint() {
+        // host + numeric port → tcp endpoint, round-trips through parse.
+        let b = call(
+            zmq__build_endpoint,
+            r#"{"transport":"tcp","host":"127.0.0.1","port":5555}"#,
+        );
+        assert_eq!(b["endpoint"], json!("tcp://127.0.0.1:5555"));
+        assert_eq!(b["known_transport"], json!(true));
+        let back = call(
+            zmq__parse_endpoint,
+            r#"{"endpoint":"tcp://127.0.0.1:5555"}"#,
+        );
+        assert_eq!(back["host"], json!("127.0.0.1"));
+        assert_eq!(back["port"], json!(5555));
+        // `*` wildcard port stays literal; opaque address passes through.
+        assert_eq!(
+            call(
+                zmq__build_endpoint,
+                r#"{"transport":"tcp","host":"*","port":"*"}"#
+            )["endpoint"],
+            json!("tcp://*:*")
+        );
+        assert_eq!(
+            call(
+                zmq__build_endpoint,
+                r#"{"transport":"ipc","address":"/tmp/feeds/0"}"#
+            )["endpoint"],
+            json!("ipc:///tmp/feeds/0")
+        );
+        // host without port omits the colon; empty host and missing address error.
+        assert_eq!(
+            call(
+                zmq__build_endpoint,
+                r#"{"transport":"inproc","host":"workers"}"#
+            )["endpoint"],
+            json!("inproc://workers")
+        );
+        assert!(err_of(&call(
+            zmq__build_endpoint,
+            r#"{"transport":"tcp","host":""}"#
+        ))
+        .contains("empty host"));
+        assert!(err_of(&call(zmq__build_endpoint, r#"{"transport":"tcp"}"#))
+            .contains("missing address or host"));
     }
 
     #[test]

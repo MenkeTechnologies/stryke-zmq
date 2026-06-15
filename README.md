@@ -164,6 +164,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::z85_encode($data, %opts)` / `Zmq::z85_decode($z85, %opts)` | string | z85 codec; opts: `encoding` |
 | `Zmq::request($endpoint, $data, %opts)` | string \| undef | one-shot REQ round-trip; opts: timeout_ms (default 5000), encoding |
 | `Zmq::parse_endpoint($endpoint)` | hashref | `{ transport, address, known_transport, host?, port? }` — no socket |
+| `Zmq::build_endpoint(%opts)` | hashref | `{ endpoint, known_transport }` — inverse of parse_endpoint; opts: transport, address \| host + port |
 | `Zmq::topic_match($subscription, $topic)` | 1 \| "" | ZMQ SUB prefix match (empty subscription matches all) |
 | `Zmq::valid_socket_type($type)` | hashref | `{ valid, canonical }` — aliases collapse (`publish` → `pub`) |
 | `Zmq::socket_types()` | list | every canonical socket-type name |

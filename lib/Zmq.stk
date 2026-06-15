@@ -269,6 +269,13 @@ fn Zmq::parse_endpoint ($endpoint) {
     Zmq::_decode("parse_endpoint", zmq__parse_endpoint(to_json({ endpoint => $endpoint })))
 }
 
+## Build a ZMQ endpoint string from parts — inverse of parse_endpoint. opts:
+## transport (required), and either address, or host + optional port (the IP
+## transports). Returns a hashref { endpoint, known_transport }.
+fn Zmq::build_endpoint (%opts) {
+    Zmq::_decode("build_endpoint", zmq__build_endpoint(to_json(\%opts)))
+}
+
 ## True if $subscription is a byte-prefix of $topic (ZMQ SUB matching).
 ## An empty subscription matches everything.
 fn Zmq::topic_match ($subscription, $topic) {

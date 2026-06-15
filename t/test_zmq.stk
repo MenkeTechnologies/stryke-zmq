@@ -103,6 +103,12 @@ val $ipc = Zmq::parse_endpoint("ipc:///tmp/feeds/0")
 assert_eq $ipc->{transport}, "ipc",          "parse_endpoint: ipc transport"
 assert_eq $ipc->{address},   "/tmp/feeds/0", "parse_endpoint: opaque address"
 
+# build_endpoint: inverse of parse_endpoint.
+assert_eq Zmq::build_endpoint(transport => "tcp", host => "127.0.0.1", port => 5555)->{endpoint}, "tcp://127.0.0.1:5555", "build_endpoint: host+port → tcp endpoint"
+assert_eq Zmq::build_endpoint(transport => "ipc", address => "/tmp/feeds/0")->{endpoint}, "ipc:///tmp/feeds/0", "build_endpoint: opaque address passes through"
+assert_eq Zmq::build_endpoint(transport => "inproc", host => "workers")->{endpoint}, "inproc://workers", "build_endpoint: host without port omits colon"
+assert_dies fn { Zmq::build_endpoint(transport => "tcp", host => "") }, "build_endpoint: rejects empty host"
+
 assert_eq Zmq::topic_match("weather.", "weather.us.ny"), 1, "topic_match: prefix matches"
 assert_eq Zmq::topic_match("sports.", "weather.us"),     0, "topic_match: non-prefix fails"
 assert_eq Zmq::topic_match("", "anything"),              1, "topic_match: empty matches all"

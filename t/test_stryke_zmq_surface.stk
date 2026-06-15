@@ -41,4 +41,11 @@ assert_ok exists &Zmq::z85_encode, "Zmq::z85_encode exists"
 assert_ok exists &Zmq::z85_decode, "Zmq::z85_decode exists"
 assert_ok exists &Zmq::request, "Zmq::request exists"
 
+# ── pure helpers (no socket) ──
+assert_ok exists &Zmq::parse_endpoint, "Zmq::parse_endpoint exists"
+assert_ok exists &Zmq::build_endpoint, "Zmq::build_endpoint exists"
+assert_ok exists &Zmq::topic_match, "Zmq::topic_match exists"
+assert_ok exists &Zmq::valid_socket_type, "Zmq::valid_socket_type exists"
+assert_ok exists &Zmq::socket_types, "Zmq::socket_types exists"
+
 test_run
