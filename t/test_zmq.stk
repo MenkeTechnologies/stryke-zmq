@@ -92,4 +92,28 @@ val $set_r = Zmq::set($setsock, "sndhwm", 500)
 assert_ok $set_r->{ok}, "set sndhwm returns ok"
 Zmq::close($setsock)
 
+# ── pure helpers (no socket) ─────────────────────────────────────────
+val $tcp = Zmq::parse_endpoint("tcp://127.0.0.1:5555")
+assert_eq $tcp->{transport}, "tcp",       "parse_endpoint: transport"
+assert_eq $tcp->{host},      "127.0.0.1", "parse_endpoint: host"
+assert_eq $tcp->{port},      5555,        "parse_endpoint: numeric port"
+assert_ok $tcp->{known_transport},        "parse_endpoint: tcp is known"
+
+val $ipc = Zmq::parse_endpoint("ipc:///tmp/feeds/0")
+assert_eq $ipc->{transport}, "ipc",          "parse_endpoint: ipc transport"
+assert_eq $ipc->{address},   "/tmp/feeds/0", "parse_endpoint: opaque address"
+
+assert_eq Zmq::topic_match("weather.", "weather.us.ny"), 1, "topic_match: prefix matches"
+assert_eq Zmq::topic_match("sports.", "weather.us"),     0, "topic_match: non-prefix fails"
+assert_eq Zmq::topic_match("", "anything"),              1, "topic_match: empty matches all"
+
+val $vt = Zmq::valid_socket_type("PUBLISH")
+assert_ok $vt->{valid},               "valid_socket_type: alias is valid"
+assert_eq $vt->{canonical}, "pub",    "valid_socket_type: canonicalizes"
+assert_ok !Zmq::valid_socket_type("nope")->{valid}, "valid_socket_type: rejects unknown"
+
+val @types = Zmq::socket_types()
+assert_eq scalar(@types), 12, "socket_types: twelve canonical names"
+assert_ok scalar(grep { $_ eq "router" } @types), "socket_types: includes router"
+
 test_run

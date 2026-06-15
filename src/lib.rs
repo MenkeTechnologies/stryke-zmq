@@ -881,6 +881,72 @@ fn op_request(opts: Value) -> Result<Value> {
     }
 }
 
+// ── pure helpers (no socket) ─────────────────────────────────────────────────
+
+/// Parse a ZeroMQ endpoint `transport://address` into its parts. For the
+/// host:port transports (tcp/udp/ws/wss) the address is further split into
+/// `host` and `port` (port may be the `*` wildcard). No socket is created.
+fn op_parse_endpoint(opts: Value) -> Result<Value> {
+    let ep = req_str(&opts, "endpoint")?;
+    let (transport, address) = ep
+        .split_once("://")
+        .ok_or_else(|| anyhow!("not a ZMQ endpoint (missing `://`): {ep}"))?;
+    if transport.is_empty() {
+        return Err(anyhow!("empty transport in endpoint: {ep}"));
+    }
+    let known = matches!(
+        transport,
+        "tcp" | "ipc" | "inproc" | "pgm" | "epgm" | "vmci" | "ws" | "wss" | "udp"
+    );
+    let mut out = json!({
+        "transport": transport,
+        "address": address,
+        "known_transport": known,
+    });
+    if matches!(transport, "tcp" | "udp" | "ws" | "wss") {
+        // Port is after the LAST colon so bare IPv6 hosts survive; `*` is the
+        // ZMQ bind wildcard for an ephemeral port.
+        if let Some((host, port)) = address.rsplit_once(':') {
+            out["host"] = json!(host);
+            out["port"] = match port.parse::<u32>() {
+                Ok(p) => json!(p),
+                Err(_) => json!(port),
+            };
+        } else {
+            out["host"] = json!(address);
+        }
+    }
+    Ok(out)
+}
+
+/// ZeroMQ SUB/XSUB matching: a subscription matches a topic when it is a
+/// byte-prefix of it; an empty subscription matches everything. Mirrors
+/// libzmq's prefix filter without a socket.
+fn op_topic_match(opts: Value) -> Result<Value> {
+    let sub = req_str(&opts, "subscription")?;
+    let topic = req_str(&opts, "topic")?;
+    let matched = topic.as_bytes().starts_with(sub.as_bytes());
+    Ok(json!({"subscription": sub, "topic": topic, "match": matched}))
+}
+
+/// Validate a socket-type name, returning its canonical lowercase form (so
+/// aliases like `publish` collapse to `pub`). Never errors — reports validity.
+fn op_valid_socket_type(opts: Value) -> Result<Value> {
+    let name = req_str(&opts, "type")?;
+    match parse_socket_type(name) {
+        Ok(ty) => Ok(json!({"valid": true, "canonical": socket_type_name(ty)})),
+        Err(_) => Ok(json!({"valid": false, "canonical": Value::Null})),
+    }
+}
+
+/// Every canonical socket-type name this package accepts.
+fn op_socket_types(_opts: Value) -> Result<Value> {
+    Ok(json!({"types": [
+        "req", "rep", "pub", "sub", "push", "pull",
+        "dealer", "router", "pair", "xpub", "xsub", "stream",
+    ]}))
+}
+
 // ── ffi boundary ─────────────────────────────────────────────────────────────
 
 /// JSON-string-in / JSON-string-out wrapper. Parses args (malformed →
@@ -968,6 +1034,10 @@ export!(zmq__z85_decode => op_z85_decode);
 export!(zmq__lib_version => op_lib_version);
 export!(zmq__has => op_has);
 export!(zmq__request => op_request);
+export!(zmq__parse_endpoint => op_parse_endpoint);
+export!(zmq__topic_match => op_topic_match);
+export!(zmq__valid_socket_type => op_valid_socket_type);
+export!(zmq__socket_types => op_socket_types);
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -1374,5 +1444,88 @@ mod tests {
         assert!(saw_listening, "monitor must report the listening event");
         call(zmq__close, &format!(r#"{{"handle":{rh}}}"#));
         call(zmq__close, &format!(r#"{{"handle":{h}}}"#));
+    }
+
+    // ── pure helpers (no socket / no libzmq runtime) ─────────────────────────
+
+    #[test]
+    fn parse_endpoint_tcp_splits_host_and_port() {
+        let v = call(
+            zmq__parse_endpoint,
+            r#"{"endpoint":"tcp://127.0.0.1:5555"}"#,
+        );
+        assert_eq!(v["transport"], json!("tcp"));
+        assert_eq!(v["host"], json!("127.0.0.1"));
+        assert_eq!(v["port"], json!(5555), "port parses to a number");
+        assert_eq!(v["known_transport"], json!(true));
+    }
+
+    #[test]
+    fn parse_endpoint_ipc_keeps_address_opaque() {
+        let v = call(zmq__parse_endpoint, r#"{"endpoint":"ipc:///tmp/feeds/0"}"#);
+        assert_eq!(v["transport"], json!("ipc"));
+        assert_eq!(v["address"], json!("/tmp/feeds/0"));
+        assert!(
+            v.get("port").is_none(),
+            "non-host:port transports carry no port"
+        );
+    }
+
+    #[test]
+    fn parse_endpoint_wildcard_bind_port() {
+        let v = call(zmq__parse_endpoint, r#"{"endpoint":"tcp://*:*"}"#);
+        assert_eq!(v["host"], json!("*"));
+        // `*` is not numeric, so it round-trips as the literal wildcard.
+        assert_eq!(v["port"], json!("*"));
+    }
+
+    #[test]
+    fn parse_endpoint_rejects_missing_scheme() {
+        let v = call(zmq__parse_endpoint, r#"{"endpoint":"127.0.0.1:5555"}"#);
+        assert!(err_of(&v).contains("missing"), "no `://` must error");
+    }
+
+    #[test]
+    fn topic_match_uses_prefix_semantics() {
+        let m = call(
+            zmq__topic_match,
+            r#"{"subscription":"weather.","topic":"weather.us.ny"}"#,
+        );
+        assert_eq!(m["match"], json!(true), "prefix matches");
+        let n = call(
+            zmq__topic_match,
+            r#"{"subscription":"sports.","topic":"weather.us"}"#,
+        );
+        assert_eq!(n["match"], json!(false), "non-prefix does not match");
+        let all = call(
+            zmq__topic_match,
+            r#"{"subscription":"","topic":"anything"}"#,
+        );
+        assert_eq!(all["match"], json!(true), "empty subscription matches all");
+    }
+
+    #[test]
+    fn valid_socket_type_canonicalizes_and_rejects() {
+        let v = call(zmq__valid_socket_type, r#"{"type":"PUBLISH"}"#);
+        assert_eq!(v["valid"], json!(true));
+        assert_eq!(v["canonical"], json!("pub"), "alias collapses to canonical");
+        let bad = call(zmq__valid_socket_type, r#"{"type":"nope"}"#);
+        assert_eq!(bad["valid"], json!(false));
+        assert_eq!(bad["canonical"], Value::Null);
+    }
+
+    #[test]
+    fn socket_types_lists_every_canonical_name() {
+        let v = call(zmq__socket_types, "{}");
+        let types = v["types"].as_array().unwrap();
+        assert_eq!(types.len(), 12, "twelve canonical socket types");
+        for name in [
+            "req", "rep", "pub", "sub", "router", "dealer", "xpub", "stream",
+        ] {
+            assert!(types.iter().any(|t| t == name), "missing {name}");
+            // Each listed name must itself validate.
+            let chk = call(zmq__valid_socket_type, &format!(r#"{{"type":"{name}"}}"#));
+            assert_eq!(chk["valid"], json!(true), "{name} must validate");
+        }
     }
 }

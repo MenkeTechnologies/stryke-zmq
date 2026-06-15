@@ -259,3 +259,30 @@ fn Zmq::request ($endpoint, $data, %opts) {
     return undef if $o->{timeout}
     $o->{reply}
 }
+
+# ── pure helpers (no socket) ─────────────────────────────────────────
+
+## Parse a ZMQ endpoint "transport://address" into a hashref:
+## { transport, address, known_transport, host?, port? }. tcp/udp/ws/wss
+## also split host/port. No socket is created.
+fn Zmq::parse_endpoint ($endpoint) {
+    Zmq::_decode("parse_endpoint", zmq__parse_endpoint(to_json({ endpoint => $endpoint })))
+}
+
+## True if $subscription is a byte-prefix of $topic (ZMQ SUB matching).
+## An empty subscription matches everything.
+fn Zmq::topic_match ($subscription, $topic) {
+    Zmq::_decode("topic_match",
+        zmq__topic_match(to_json({ subscription => $subscription, topic => $topic })))->{match}
+}
+
+## Validate a socket-type name → { valid, canonical }. Aliases (e.g.
+## "publish") collapse to their canonical form ("pub").
+fn Zmq::valid_socket_type ($type) {
+    Zmq::_decode("valid_socket_type", zmq__valid_socket_type(to_json({ type => $type })))
+}
+
+## List of every canonical socket-type name this package accepts.
+fn Zmq::socket_types {
+    @{ Zmq::_decode("socket_types", zmq__socket_types("{}"))->{types} }
+}

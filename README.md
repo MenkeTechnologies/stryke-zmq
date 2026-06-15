@@ -163,8 +163,13 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::curve_keypair()` | hashref | `{ public, secret }` z85 keys (needs libsodium-enabled libzmq) |
 | `Zmq::z85_encode($data, %opts)` / `Zmq::z85_decode($z85, %opts)` | string | z85 codec; opts: `encoding` |
 | `Zmq::request($endpoint, $data, %opts)` | string \| undef | one-shot REQ round-trip; opts: timeout_ms (default 5000), encoding |
+| `Zmq::parse_endpoint($endpoint)` | hashref | `{ transport, address, known_transport, host?, port? }` — no socket |
+| `Zmq::topic_match($subscription, $topic)` | 1 \| "" | ZMQ SUB prefix match (empty subscription matches all) |
+| `Zmq::valid_socket_type($type)` | hashref | `{ valid, canonical }` — aliases collapse (`publish` → `pub`) |
+| `Zmq::socket_types()` | list | every canonical socket-type name |
 
-Endpoints follow ZeroMQ's transport syntax: `tcp://host:port`,
+The last four are pure helpers — string/validation utilities that create no
+socket. Endpoints follow ZeroMQ's transport syntax: `tcp://host:port`,
 `ipc:///tmp/sock`, `inproc://name`, `pgm://`, `epgm://`.
 
 Payloads default to UTF-8 framing. For arbitrary bytes (NULs, high bytes)

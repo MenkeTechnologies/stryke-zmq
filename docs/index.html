@@ -168,6 +168,9 @@ val $reply = Zmq::request("tcp://localhost:5555", "hello", timeout_ms =&gt; 2000
             <tr><td>Zmq::proxy($frontend, $backend, %opts)</td><td>backgrounded <code>zmq_proxy</code> device; <code>capture</code>, <code>control</code> opts</td></tr>
             <tr><td>Zmq::curve_keypair() / z85_encode / z85_decode</td><td>CURVE keypair (needs libsodium) + z85 codec</td></tr>
             <tr><td>Zmq::request($endpoint, $data, %opts)</td><td>one-shot REQ round-trip; returns reply or undef on timeout</td></tr>
+            <tr><td>Zmq::parse_endpoint($endpoint)</td><td>parse transport://address (host/port for tcp) — no socket</td></tr>
+            <tr><td>Zmq::topic_match($subscription, $topic)</td><td>ZMQ SUB prefix match (empty subscription matches all)</td></tr>
+            <tr><td>Zmq::valid_socket_type($type) / socket_types()</td><td>validate + canonicalize socket-type names; list them all</td></tr>
           </tbody>
         </table>
         <p>Endpoints follow ZeroMQ transport syntax: <code>tcp://host:port</code>, <code>ipc:///path</code>, <code>inproc://name</code>, <code>pgm://</code>. Full reference in the <a href="https://github.com/MenkeTechnologies/stryke-zmq#0x04-api-reference">README API section</a>.</p>
