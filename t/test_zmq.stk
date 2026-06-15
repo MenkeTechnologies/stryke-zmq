@@ -137,6 +137,14 @@ assert_eq join(",", Zmq::socket_peers("push")), "pull",       "socket_peers: pus
 assert_eq join(",", Zmq::socket_peers("pair")), "pair",       "socket_peers: pair ↔ pair"
 assert_dies fn { Zmq::socket_peers("nope") }, "socket_peers: rejects an unknown socket type"
 
+# socket_types_compatible: binary peer predicate over the same table.
+assert_eq Zmq::socket_types_compatible("req", "rep"),       1, "socket_types_compatible: req ↔ rep"
+assert_eq Zmq::socket_types_compatible("PUBLISH", "sub"),   1, "socket_types_compatible: pub ↔ sub (alias accepted)"
+assert_eq Zmq::socket_types_compatible("dealer", "router"), 1, "socket_types_compatible: dealer ↔ router"
+assert_eq Zmq::socket_types_compatible("req", "pub"),       0, "socket_types_compatible: req ✗ pub"
+assert_eq Zmq::socket_types_compatible("push", "push"),     0, "socket_types_compatible: push ✗ push"
+assert_dies fn { Zmq::socket_types_compatible("req", "nope") }, "socket_types_compatible: rejects an unknown socket type"
+
 # socket_caps: messaging pattern + send/recv directionality (zmq_socket(3)).
 val $pubc = Zmq::socket_caps("pub")
 assert_eq $pubc->{pattern},  "publish-subscribe", "socket_caps: pub pattern"

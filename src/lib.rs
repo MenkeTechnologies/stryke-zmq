@@ -1002,15 +1002,11 @@ fn op_valid_socket_type(opts: Value) -> Result<Value> {
     }
 }
 
-/// The socket types a given type can validly connect to — ZeroMQ's documented
-/// messaging-pattern compatibility (the `zmq_socket(3)` matrix). The input is
-/// canonicalized (aliases accepted), and the peer list is canonical names.
-/// Lets you validate a topology before wiring sockets. Pure.
-fn op_socket_peers(opts: Value) -> Result<Value> {
-    let name = req_str(&opts, "type")?;
-    let ty = parse_socket_type(name)?;
-    let canonical = socket_type_name(ty);
-    let peers: &[&str] = match canonical {
+/// Single source of truth for the libzmq `zmq_socket` "Compatible peer sockets"
+/// table: the canonical peer-type names a given type can be connected to.
+/// Used by both `op_socket_peers` and `op_socket_types_compatible`.
+fn compatible_peers(canonical: &str) -> Result<&'static [&'static str]> {
+    Ok(match canonical {
         "req" => &["rep", "router"],
         "rep" => &["req", "dealer"],
         "dealer" => &["rep", "dealer", "router"],
@@ -1023,9 +1019,34 @@ fn op_socket_peers(opts: Value) -> Result<Value> {
         "pull" => &["push"],
         "pair" => &["pair"],
         "stream" => &["stream"],
-        other => return Err(anyhow::anyhow!("no peer rule for socket type `{other}`")),
-    };
-    Ok(json!({"type": canonical, "peers": peers}))
+        other => return Err(anyhow!("no peer rule for socket type `{other}`")),
+    })
+}
+
+/// Whether two ZeroMQ socket types can be connected as peers, per the libzmq
+/// `zmq_socket` compatibility table (e.g. REQ↔REP, PUB↔SUB, PUSH↔PULL,
+/// DEALER↔ROUTER, PAIR↔PAIR). Type names are case-insensitive and accept the
+/// `publish`/`subscribe` aliases. opts: `a`, `b`. Returns
+/// `{a, b, compatible, a_peers}` with canonical names. Pure.
+fn op_socket_types_compatible(opts: Value) -> Result<Value> {
+    let a = socket_type_name(parse_socket_type(req_str(&opts, "a")?)?);
+    let b = socket_type_name(parse_socket_type(req_str(&opts, "b")?)?);
+    let a_peers = compatible_peers(a)?;
+    Ok(json!({
+        "a": a,
+        "b": b,
+        "compatible": a_peers.contains(&b),
+        "a_peers": a_peers,
+    }))
+}
+
+/// The socket types a given type can validly connect to — ZeroMQ's documented
+/// messaging-pattern compatibility (the `zmq_socket(3)` matrix). The input is
+/// canonicalized (aliases accepted), and the peer list is canonical names.
+/// Lets you validate a topology before wiring sockets. Pure.
+fn op_socket_peers(opts: Value) -> Result<Value> {
+    let canonical = socket_type_name(parse_socket_type(req_str(&opts, "type")?)?);
+    Ok(json!({"type": canonical, "peers": compatible_peers(canonical)?}))
 }
 
 /// Classify a socket type by its ZeroMQ messaging `pattern` and report its
@@ -1161,6 +1182,7 @@ export!(zmq__build_endpoint => op_build_endpoint);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__topic_match_any => op_topic_match_any);
 export!(zmq__valid_socket_type => op_valid_socket_type);
+export!(zmq__socket_types_compatible => op_socket_types_compatible);
 export!(zmq__socket_peers => op_socket_peers);
 export!(zmq__socket_caps => op_socket_caps);
 export!(zmq__socket_types => op_socket_types);
@@ -1789,6 +1811,55 @@ mod tests {
         assert!(err_of(&call(zmq__socket_peers, r#"{"type":"nope"}"#))
             .to_lowercase()
             .contains("socket"));
+    }
+
+    #[test]
+    fn socket_types_compatible_matches_the_peer_table() {
+        // Canonical compatible pairs.
+        for (a, b) in [
+            ("req", "rep"),
+            ("req", "router"),
+            ("pub", "sub"),
+            ("push", "pull"),
+            ("dealer", "router"),
+            ("pair", "pair"),
+        ] {
+            let v = call(
+                zmq__socket_types_compatible,
+                &format!(r#"{{"a":"{a}","b":"{b}"}}"#),
+            );
+            assert_eq!(v["compatible"], json!(true), "{a} ↔ {b} must be compatible");
+        }
+        // Incompatible: REQ does not talk to PUB; PUSH does not talk to PUSH.
+        assert_eq!(
+            call(zmq__socket_types_compatible, r#"{"a":"req","b":"pub"}"#)["compatible"],
+            json!(false)
+        );
+        assert_eq!(
+            call(zmq__socket_types_compatible, r#"{"a":"push","b":"push"}"#)["compatible"],
+            json!(false)
+        );
+        // Aliases canonicalize, and a_peers echoes the shared peer table.
+        let v = call(zmq__socket_types_compatible, r#"{"a":"PUBLISH","b":"sub"}"#);
+        assert_eq!(v["a"], json!("pub"));
+        assert_eq!(v["compatible"], json!(true));
+        assert_eq!(v["a_peers"], json!(["sub", "xsub"]));
+        // Compatibility agrees with socket_peers for the same type.
+        let peers = call(zmq__socket_peers, r#"{"type":"dealer"}"#);
+        for p in peers["peers"].as_array().unwrap() {
+            let chk = call(
+                zmq__socket_types_compatible,
+                &format!(r#"{{"a":"dealer","b":"{}"}}"#, p.as_str().unwrap()),
+            );
+            assert_eq!(chk["compatible"], json!(true));
+        }
+        // Unknown type errors.
+        assert!(err_of(&call(
+            zmq__socket_types_compatible,
+            r#"{"a":"req","b":"nope"}"#
+        ))
+        .to_lowercase()
+        .contains("socket"));
     }
 
     #[test]

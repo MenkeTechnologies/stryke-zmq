@@ -169,6 +169,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::topic_match_any($topic, \@subscriptions)` | `{ topic, match, matched }` | XPUB set routing: which subscriptions prefix-match the topic (in input order) |
 | `Zmq::valid_socket_type($type)` | hashref | `{ valid, canonical }` — aliases collapse (`publish` → `pub`) |
 | `Zmq::socket_peers($type)` | list | socket types `$type` can validly connect to (ZMQ messaging-pattern compatibility) |
+| `Zmq::socket_types_compatible($a, $b)` | 1 \| "" | whether types `$a` and `$b` can be connected as peers (REQ↔REP, PUB↔SUB, PUSH↔PULL, …) |
 | `Zmq::socket_caps($type)` | `{ type, pattern, can_send, can_recv }` | messaging pattern + send/recv directionality (PUB send-only, SUB recv-only, …) |
 | `Zmq::socket_types()` | list | every canonical socket-type name |
 

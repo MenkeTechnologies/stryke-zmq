@@ -1,6 +1,6 @@
 [package]
 name = "stryke-zmq"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "ZeroMQ cdylib for stryke. Brokerless req/rep, pub/sub, push/pull, dealer/router over a persistent in-process socket registry"
 authors = ["MenkeTechnologies"]

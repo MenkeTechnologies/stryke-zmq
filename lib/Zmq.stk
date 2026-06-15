@@ -305,6 +305,14 @@ fn Zmq::socket_peers ($type) {
     @{ Zmq::_decode("socket_peers", zmq__socket_peers(to_json({ type => $type })))->{peers} }
 }
 
+## True if socket types $a and $b can be connected as peers, per ZeroMQ's
+## compatibility table (REQ↔REP, PUB↔SUB, PUSH↔PULL, DEALER↔ROUTER, PAIR↔PAIR).
+## Type names are case-insensitive and accept publish/subscribe aliases.
+fn Zmq::socket_types_compatible ($a, $b) {
+    Zmq::_decode("socket_types_compatible",
+        zmq__socket_types_compatible(to_json({ a => $a, b => $b })))->{compatible}
+}
+
 ## Classify $type by its ZeroMQ messaging pattern and report directionality.
 ## Returns a hashref { type, pattern, can_send, can_recv } — e.g. PUB is
 ## send-only, SUB receive-only. Lets you check whether send/recv is legal on a
