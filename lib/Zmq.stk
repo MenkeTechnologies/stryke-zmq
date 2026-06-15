@@ -289,6 +289,13 @@ fn Zmq::valid_socket_type ($type) {
     Zmq::_decode("valid_socket_type", zmq__valid_socket_type(to_json({ type => $type })))
 }
 
+## The socket types $type can validly connect to — ZeroMQ's documented
+## messaging-pattern compatibility. Returns a list of canonical peer names. Lets
+## you validate a topology before wiring sockets.
+fn Zmq::socket_peers ($type) {
+    @{ Zmq::_decode("socket_peers", zmq__socket_peers(to_json({ type => $type })))->{peers} }
+}
+
 ## List of every canonical socket-type name this package accepts.
 fn Zmq::socket_types {
     @{ Zmq::_decode("socket_types", zmq__socket_types("{}"))->{types} }

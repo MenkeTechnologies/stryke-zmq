@@ -976,6 +976,32 @@ fn op_valid_socket_type(opts: Value) -> Result<Value> {
     }
 }
 
+/// The socket types a given type can validly connect to — ZeroMQ's documented
+/// messaging-pattern compatibility (the `zmq_socket(3)` matrix). The input is
+/// canonicalized (aliases accepted), and the peer list is canonical names.
+/// Lets you validate a topology before wiring sockets. Pure.
+fn op_socket_peers(opts: Value) -> Result<Value> {
+    let name = req_str(&opts, "type")?;
+    let ty = parse_socket_type(name)?;
+    let canonical = socket_type_name(ty);
+    let peers: &[&str] = match canonical {
+        "req" => &["rep", "router"],
+        "rep" => &["req", "dealer"],
+        "dealer" => &["rep", "dealer", "router"],
+        "router" => &["req", "dealer", "router"],
+        "pub" => &["sub", "xsub"],
+        "sub" => &["pub", "xpub"],
+        "xpub" => &["sub", "xsub"],
+        "xsub" => &["pub", "xpub"],
+        "push" => &["pull"],
+        "pull" => &["push"],
+        "pair" => &["pair"],
+        "stream" => &["stream"],
+        other => return Err(anyhow::anyhow!("no peer rule for socket type `{other}`")),
+    };
+    Ok(json!({"type": canonical, "peers": peers}))
+}
+
 /// Every canonical socket-type name this package accepts.
 fn op_socket_types(_opts: Value) -> Result<Value> {
     Ok(json!({"types": [
@@ -1075,6 +1101,7 @@ export!(zmq__parse_endpoint => op_parse_endpoint);
 export!(zmq__build_endpoint => op_build_endpoint);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__valid_socket_type => op_valid_socket_type);
+export!(zmq__socket_peers => op_socket_peers);
 export!(zmq__socket_types => op_socket_types);
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -1612,5 +1639,56 @@ mod tests {
             let chk = call(zmq__valid_socket_type, &format!(r#"{{"type":"{name}"}}"#));
             assert_eq!(chk["valid"], json!(true), "{name} must validate");
         }
+    }
+
+    #[test]
+    fn socket_peers_follows_the_zmq_compatibility_matrix() {
+        // REQ talks to REP and ROUTER.
+        let req = call(zmq__socket_peers, r#"{"type":"req"}"#);
+        assert_eq!(req["type"], json!("req"));
+        assert_eq!(req["peers"], json!(["rep", "router"]));
+        // Alias input is canonicalized (publish → pub), then X variants.
+        assert_eq!(
+            call(zmq__socket_peers, r#"{"type":"PUBLISH"}"#)["type"],
+            json!("pub")
+        );
+        assert_eq!(
+            call(zmq__socket_peers, r#"{"type":"pub"}"#)["peers"],
+            json!(["sub", "xsub"])
+        );
+        assert_eq!(
+            call(zmq__socket_peers, r#"{"type":"sub"}"#)["peers"],
+            json!(["pub", "xpub"])
+        );
+        // Pipeline and exclusive-pair.
+        assert_eq!(
+            call(zmq__socket_peers, r#"{"type":"push"}"#)["peers"],
+            json!(["pull"])
+        );
+        assert_eq!(
+            call(zmq__socket_peers, r#"{"type":"pair"}"#)["peers"],
+            json!(["pair"])
+        );
+        // Symmetry: every listed peer lists the original back.
+        for ty in [
+            "req", "rep", "pub", "sub", "push", "pull", "dealer", "router", "pair",
+        ] {
+            let peers = call(zmq__socket_peers, &format!(r#"{{"type":"{ty}"}}"#));
+            for p in peers["peers"].as_array().unwrap() {
+                let back = call(
+                    zmq__socket_peers,
+                    &format!(r#"{{"type":"{}"}}"#, p.as_str().unwrap()),
+                );
+                assert!(
+                    back["peers"].as_array().unwrap().iter().any(|x| x == ty),
+                    "{ty} ↔ {} must be mutual",
+                    p.as_str().unwrap()
+                );
+            }
+        }
+        // Unknown socket type errors.
+        assert!(err_of(&call(zmq__socket_peers, r#"{"type":"nope"}"#))
+            .to_lowercase()
+            .contains("socket"));
     }
 }
