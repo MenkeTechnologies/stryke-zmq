@@ -299,6 +299,14 @@ fn Zmq::endpoint_bind_to_connect ($endpoint, %opts) {
         zmq__endpoint_bind_to_connect(to_json({ endpoint => $endpoint, host => $opts{host} })))
 }
 
+## Validate a ZMQ $endpoint by transport syntax — stricter than parse_endpoint.
+## Checks transport://address, a known transport, host + port (* or 1-65535) for
+## tcp/udp/ws/wss, a non-empty path/name/address otherwise. Returns a hashref
+## { endpoint, valid, reason, transport }.
+fn Zmq::valid_endpoint ($endpoint) {
+    Zmq::_decode("valid_endpoint", zmq__valid_endpoint(to_json({ endpoint => $endpoint })))
+}
+
 ## True if $subscription is a byte-prefix of $topic (ZMQ SUB matching).
 ## An empty subscription matches everything.
 fn Zmq::topic_match ($subscription, $topic) {

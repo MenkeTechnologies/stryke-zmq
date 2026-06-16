@@ -117,6 +117,18 @@ assert_eq Zmq::endpoint_bind_to_connect("ipc:///tmp/s")->{endpoint}, "ipc:///tmp
 assert_eq Zmq::endpoint_bind_to_connect("tcp://*:9000", host => "broker")->{endpoint}, "tcp://broker:9000", "endpoint_bind_to_connect: custom connect host"
 assert_dies fn { Zmq::endpoint_bind_to_connect("no-scheme") }, "endpoint_bind_to_connect: rejects a malformed endpoint"
 
+# valid_endpoint: strict transport-syntax validation.
+assert_ok Zmq::valid_endpoint("tcp://127.0.0.1:5555")->{valid}, "valid_endpoint: concrete tcp"
+assert_ok Zmq::valid_endpoint("tcp://*:*")->{valid},            "valid_endpoint: bind wildcard host+port"
+assert_ok Zmq::valid_endpoint("ipc:///tmp/feeds/0")->{valid},   "valid_endpoint: ipc path"
+assert_ok Zmq::valid_endpoint("inproc://workers")->{valid},     "valid_endpoint: inproc name"
+assert_eq Zmq::valid_endpoint("no-scheme")->{valid}, 0,         "valid_endpoint: missing :// rejected"
+assert_eq Zmq::valid_endpoint("zzz://x")->{valid}, 0,           "valid_endpoint: unknown transport rejected"
+assert_eq Zmq::valid_endpoint("tcp://127.0.0.1")->{valid}, 0,   "valid_endpoint: tcp needs a port"
+assert_eq Zmq::valid_endpoint("tcp://host:99999")->{valid}, 0,  "valid_endpoint: port out of range"
+assert_eq Zmq::valid_endpoint("inproc://")->{valid}, 0,         "valid_endpoint: empty inproc name rejected"
+assert_match qr/port/, Zmq::valid_endpoint("tcp://host:abc")->{reason}, "valid_endpoint: reason names the bad port"
+
 assert_eq Zmq::topic_match("weather.", "weather.us.ny"), 1, "topic_match: prefix matches"
 assert_eq Zmq::topic_match("sports.", "weather.us"),     0, "topic_match: non-prefix fails"
 assert_eq Zmq::topic_match("", "anything"),              1, "topic_match: empty matches all"

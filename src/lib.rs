@@ -1063,6 +1063,65 @@ fn op_endpoint_bind_to_connect(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Validate a ZMQ endpoint string by transport syntax — stricter than
+/// `parse_endpoint`, which only splits and flags an unknown transport. Checks: a
+/// non-empty `transport://address`; a known transport (tcp/ipc/inproc/pgm/epgm/
+/// vmci/ws/wss/udp); for the IP transports (tcp/udp/ws/wss) a non-empty host and
+/// a port that is `*` (bind wildcard) or 1–65535; for ipc a non-empty path; for
+/// inproc a non-empty name; for pgm/epgm/vmci a non-empty address. A `ws`/`wss`
+/// path (`/foo`) and a bracketed IPv6 host are tolerated. opts: `endpoint`.
+/// Returns `{endpoint, valid, reason, transport}`. Pure.
+fn op_valid_endpoint(opts: Value) -> Result<Value> {
+    let ep = req_str(&opts, "endpoint")?;
+    let (transport, address) = match ep.split_once("://") {
+        Some(parts) => parts,
+        None => {
+            return Ok(json!({
+                "endpoint": ep, "valid": false,
+                "reason": "missing `://`", "transport": Value::Null,
+            }));
+        }
+    };
+    let known = matches!(
+        transport,
+        "tcp" | "ipc" | "inproc" | "pgm" | "epgm" | "vmci" | "ws" | "wss" | "udp"
+    );
+    let reason: Option<String> = if transport.is_empty() {
+        Some("empty transport".into())
+    } else if !known {
+        Some(format!("unknown transport `{transport}`"))
+    } else if matches!(transport, "tcp" | "udp" | "ws" | "wss") {
+        // The authority is the part before any `/path` (ws/wss). Host is before
+        // the LAST ':' so a bracketed IPv6 literal survives.
+        let authority = address.split('/').next().unwrap_or(address);
+        match authority.rsplit_once(':') {
+            None => Some("missing `:port`".into()),
+            Some((host, port)) => {
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                if host.is_empty() {
+                    Some("empty host".into())
+                } else if port == "*"
+                    || matches!(port.parse::<u32>(), Ok(p) if (1..=65535).contains(&p))
+                {
+                    None
+                } else {
+                    Some(format!("invalid port `{port}` (1-65535 or `*`)"))
+                }
+            }
+        }
+    } else if address.is_empty() {
+        Some(format!("empty {transport} address"))
+    } else {
+        None
+    };
+    Ok(json!({
+        "endpoint": ep,
+        "valid": reason.is_none(),
+        "reason": reason,
+        "transport": transport,
+    }))
+}
+
 /// ZeroMQ SUB/XSUB matching: a subscription matches a topic when it is a
 /// byte-prefix of it; an empty subscription matches everything. Mirrors
 /// libzmq's prefix filter without a socket.
@@ -1289,6 +1348,7 @@ export!(zmq__request => op_request);
 export!(zmq__parse_endpoint => op_parse_endpoint);
 export!(zmq__build_endpoint => op_build_endpoint);
 export!(zmq__endpoint_bind_to_connect => op_endpoint_bind_to_connect);
+export!(zmq__valid_endpoint => op_valid_endpoint);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__topic_match_any => op_topic_match_any);
 export!(zmq__valid_socket_type => op_valid_socket_type);
@@ -1888,6 +1948,39 @@ mod tests {
             r#"{"endpoint":"no-scheme"}"#
         ))
         .contains("not a ZMQ endpoint"));
+    }
+
+    #[test]
+    fn valid_endpoint_checks_transport_syntax() {
+        let v = |ep: &str| {
+            call(zmq__valid_endpoint, &format!(r#"{{"endpoint":"{ep}"}}"#))["valid"]
+                .as_bool()
+                .unwrap()
+        };
+        // Valid forms across transports.
+        assert!(v("tcp://127.0.0.1:5555"));
+        assert!(v("tcp://*:*"), "bind wildcard host+port is valid");
+        assert!(v("tcp://[::1]:5555"), "bracketed IPv6 host");
+        assert!(v("ws://host:80/path"), "ws path is tolerated");
+        assert!(v("ipc:///tmp/feeds/0"));
+        assert!(v("inproc://workers"));
+        assert!(v("pgm://eth0;239.0.0.1:7000"));
+        // Invalid: no scheme, unknown transport, missing port, bad port, empty addr.
+        assert!(!v("no-scheme"));
+        assert!(!v("zzz://x"));
+        assert!(!v("tcp://127.0.0.1"), "tcp needs a port");
+        assert!(!v("tcp://host:99999"), "port out of range");
+        assert!(!v("tcp://:5555"), "empty host");
+        assert!(!v("inproc://"), "empty inproc name");
+        // The reason and transport fields are populated on failure.
+        let bad = call(zmq__valid_endpoint, r#"{"endpoint":"tcp://host:abc"}"#);
+        assert_eq!(bad["valid"], json!(false));
+        assert!(bad["reason"].as_str().unwrap().contains("port"));
+        assert_eq!(bad["transport"], json!("tcp"));
+        // A no-scheme string reports the missing `://` with a null transport.
+        let ns = call(zmq__valid_endpoint, r#"{"endpoint":"oops"}"#);
+        assert_eq!(ns["transport"], Value::Null);
+        assert!(ns["reason"].as_str().unwrap().contains("://"));
     }
 
     #[test]

@@ -168,6 +168,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::parse_endpoint($endpoint)` | hashref | `{ transport, address, known_transport, host?, port? }` — no socket |
 | `Zmq::build_endpoint(%opts)` | hashref | `{ endpoint, known_transport }` — inverse of parse_endpoint; opts: transport, address \| host + port |
 | `Zmq::endpoint_bind_to_connect($endpoint, %opts)` | hashref | `{ endpoint, bind_endpoint, changed }` — rewrite a wildcard bind host (`*`/`0.0.0.0`/`::`) to a connectable one (opts: host, default localhost) |
+| `Zmq::valid_endpoint($endpoint)` | hashref | `{ endpoint, valid, reason, transport }` — strict transport-syntax check (stricter than parse_endpoint): known transport, host+port (`*` or 1-65535) for tcp/udp/ws/wss, non-empty path/name/address otherwise |
 | `Zmq::topic_match($subscription, $topic)` | 1 \| "" | ZMQ SUB prefix match (empty subscription matches all) |
 | `Zmq::topic_match_any($topic, \@subscriptions)` | `{ topic, match, matched }` | XPUB set routing: which subscriptions prefix-match the topic (in input order) |
 | `Zmq::valid_socket_type($type)` | hashref | `{ valid, canonical }` — aliases collapse (`publish` → `pub`) |
