@@ -162,6 +162,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::proxy($frontend, $backend, %opts)` | hashref | backgrounded `zmq_proxy` device; opts: `capture`, `control` (steerable) |
 | `Zmq::curve_keypair()` | hashref | `{ public, secret }` z85 keys (needs libsodium-enabled libzmq) |
 | `Zmq::z85_encode($data, %opts)` / `Zmq::z85_decode($z85, %opts)` | string | z85 codec; opts: `encoding` |
+| `Zmq::z85_valid($z85)` | `{ z85, valid, reason }` | structural RFC-32 check: length ÷5 and Z85 alphabet (non-throwing predicate) |
 | `Zmq::request($endpoint, $data, %opts)` | string \| undef | one-shot REQ round-trip; opts: timeout_ms (default 5000), encoding |
 | `Zmq::parse_endpoint($endpoint)` | hashref | `{ transport, address, known_transport, host?, port? }` — no socket |
 | `Zmq::build_endpoint(%opts)` | hashref | `{ endpoint, known_transport }` — inverse of parse_endpoint; opts: transport, address \| host + port |

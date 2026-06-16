@@ -39,6 +39,7 @@ assert_ok exists &Zmq::proxy, "Zmq::proxy exists"
 assert_ok exists &Zmq::curve_keypair, "Zmq::curve_keypair exists"
 assert_ok exists &Zmq::z85_encode, "Zmq::z85_encode exists"
 assert_ok exists &Zmq::z85_decode, "Zmq::z85_decode exists"
+assert_ok exists &Zmq::z85_valid, "Zmq::z85_valid exists"
 assert_ok exists &Zmq::request, "Zmq::request exists"
 
 # ── pure helpers (no socket) ──

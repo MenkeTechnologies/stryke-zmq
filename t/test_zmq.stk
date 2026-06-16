@@ -145,6 +145,12 @@ assert_eq Zmq::socket_types_compatible("req", "pub"),       0, "socket_types_com
 assert_eq Zmq::socket_types_compatible("push", "push"),     0, "socket_types_compatible: push ✗ push"
 assert_dies fn { Zmq::socket_types_compatible("req", "nope") }, "socket_types_compatible: rejects an unknown socket type"
 
+# z85_valid: structural RFC 32 check (length %5, Z85 alphabet).
+assert_eq Zmq::z85_valid("HelloWorld")->{valid}, 1, "z85_valid: 10 alnum chars are structurally valid"
+assert_eq Zmq::z85_valid("")->{valid},           1, "z85_valid: empty string is valid"
+assert_eq Zmq::z85_valid("Hello1")->{valid},     0, "z85_valid: length must be a multiple of 5"
+assert_eq Zmq::z85_valid(Zmq::z85_encode("cafebabe", encoding => "hex"))->{valid}, 1, "z85_valid: a real encoded string passes"
+
 # socket_caps: messaging pattern + send/recv directionality (zmq_socket(3)).
 val $pubc = Zmq::socket_caps("pub")
 assert_eq $pubc->{pattern},  "publish-subscribe", "socket_caps: pub pattern"

@@ -835,6 +835,29 @@ fn op_z85_decode(opts: Value) -> Result<Value> {
     Ok(json!({"data": bytes_to_payload(&opts, &bytes)?, "bytes": bytes.len()}))
 }
 
+/// The 85-character Z85 alphabet, in encoder order (ZeroMQ RFC 32).
+const Z85_ALPHABET: &str =
+    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+
+/// Structurally validate a Z85 string per RFC 32 without decoding it (the
+/// non-throwing predicate `z85_decode` lacks): the length must be a multiple of
+/// 5 and every character must be in the Z85 alphabet. An empty string is valid
+/// (it encodes zero bytes). This is a cheap structural check — it does not
+/// verify that each 5-char group is below the 2^32 value ceiling, which only
+/// `z85_decode` enforces. opts: `z85` (required). Returns `{z85, valid,
+/// reason}`. Pure.
+fn op_z85_valid(opts: Value) -> Result<Value> {
+    let s = req_str(&opts, "z85")?;
+    let reason: Option<&str> = if s.len() % 5 != 0 {
+        Some("length must be a multiple of 5")
+    } else if !s.chars().all(|c| Z85_ALPHABET.contains(c)) {
+        Some("contains a character outside the Z85 alphabet")
+    } else {
+        None
+    };
+    Ok(json!({"z85": s, "valid": reason.is_none(), "reason": reason}))
+}
+
 /// Vendored libzmq version as `{major,minor,patch,version}`.
 fn op_lib_version(_opts: Value) -> Result<Value> {
     let (major, minor, patch) = zmq::version();
@@ -1174,6 +1197,7 @@ export!(zmq__proxy => op_proxy);
 export!(zmq__curve_keypair => op_curve_keypair);
 export!(zmq__z85_encode => op_z85_encode);
 export!(zmq__z85_decode => op_z85_decode);
+export!(zmq__z85_valid => op_z85_valid);
 export!(zmq__lib_version => op_lib_version);
 export!(zmq__has => op_has);
 export!(zmq__request => op_request);
@@ -1538,6 +1562,38 @@ mod tests {
             &format!(r#"{{"z85":"{z}","encoding":"hex"}}"#),
         );
         assert_eq!(dec["data"], "deadbeef", "z85 must round-trip the bytes");
+        // z85_valid agrees with the encoder: a freshly encoded string is valid.
+        assert_eq!(
+            call(zmq__z85_valid, &format!(r#"{{"z85":"{z}"}}"#))["valid"],
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn z85_valid_checks_length_and_alphabet() {
+        // 5-char multiples of valid alphabet chars pass; the empty string passes.
+        assert_eq!(
+            call(zmq__z85_valid, r#"{"z85":"HelloWorld"}"#)["valid"],
+            json!(true)
+        );
+        assert_eq!(call(zmq__z85_valid, r#"{"z85":""}"#)["valid"], json!(true));
+        // Length not a multiple of 5 fails with a length reason.
+        let short = call(zmq__z85_valid, r#"{"z85":"Hello1"}"#);
+        assert_eq!(short["valid"], json!(false));
+        assert!(short["reason"].as_str().unwrap().contains("multiple of 5"));
+        // A character outside the Z85 alphabet (a backtick) fails.
+        let bad = call(zmq__z85_valid, r#"{"z85":"Hell`"}"#);
+        assert_eq!(bad["valid"], json!(false));
+        assert!(bad["reason"].as_str().unwrap().contains("Z85 alphabet"));
+        // Any genuinely encoded string passes the structural check (4 bytes →
+        // z85 needs an input length divisible by 4).
+        let enc = call(zmq__z85_encode, r#"{"data":"cafebabe","encoding":"hex"}"#);
+        let z = enc["z85"].as_str().unwrap();
+        assert_eq!(
+            call(zmq__z85_valid, &format!(r#"{{"z85":"{z}"}}"#))["valid"],
+            json!(true)
+        );
+        assert!(err_of(&call(zmq__z85_valid, "{}")).contains("z85"));
     }
 
     /// `lib_version` reports a libzmq ≥ 4 (the vendored zeromq-src is 4.x),

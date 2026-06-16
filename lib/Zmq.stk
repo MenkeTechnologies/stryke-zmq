@@ -248,6 +248,13 @@ fn Zmq::z85_decode ($z85, %opts) {
         zmq__z85_decode(to_json({ z85 => $z85, encoding => $opts{encoding} })))->{data}
 }
 
+## Structurally validate a z85 string (RFC 32): length a multiple of 5 and all
+## chars in the Z85 alphabet. Cheap check — does not verify the per-group value
+## ceiling that z85_decode enforces. Returns a hashref { z85, valid, reason }.
+fn Zmq::z85_valid ($z85) {
+    Zmq::_decode("z85_valid", zmq__z85_valid(to_json({ z85 => $z85 })))
+}
+
 # ── one-shot request ────────────────────────────────────────────────
 
 ## Connect an ephemeral REQ socket to $endpoint, send $data, return the
