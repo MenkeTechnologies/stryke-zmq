@@ -1019,6 +1019,50 @@ fn op_build_endpoint(opts: Value) -> Result<Value> {
     }))
 }
 
+/// A wildcard bind host that has no fixed address to connect to.
+fn is_wildcard_host(h: &str) -> bool {
+    matches!(h, "*" | "0.0.0.0" | "::" | "[::]")
+}
+
+/// Rewrite a ZMQ *bind* endpoint into a *connect*able one by replacing a
+/// wildcard bind host (`*`, `0.0.0.0`, `::`, `[::]`) with a concrete host
+/// (default `localhost`, override with `host`). Only the IP transports
+/// (tcp/udp/ws/wss) carry a host to rewrite; other transports (ipc/inproc/…) and
+/// already-concrete hosts pass through unchanged. The port — including a `*`
+/// ephemeral-port wildcard, which is only known at runtime — is preserved. opts:
+/// `endpoint` (required), optional `host`. Returns `{endpoint, bind_endpoint,
+/// changed}`. Pure.
+fn op_endpoint_bind_to_connect(opts: Value) -> Result<Value> {
+    let ep = req_str(&opts, "endpoint")?;
+    let connect_host = opts
+        .get("host")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("localhost");
+    let (transport, address) = ep
+        .split_once("://")
+        .ok_or_else(|| anyhow!("not a ZMQ endpoint (missing `://`): {ep}"))?;
+    let is_ip = matches!(transport, "tcp" | "udp" | "ws" | "wss");
+    let (new_address, changed) = if is_ip {
+        // Host is before the LAST ':' so bare IPv6 literals survive, like parse_endpoint.
+        match address.rsplit_once(':') {
+            Some((host, port)) if is_wildcard_host(host) => {
+                (format!("{connect_host}:{port}"), true)
+            }
+            // A host with no port at all.
+            None if is_wildcard_host(address) => (connect_host.to_string(), true),
+            _ => (address.to_string(), false),
+        }
+    } else {
+        (address.to_string(), false)
+    };
+    Ok(json!({
+        "endpoint": format!("{transport}://{new_address}"),
+        "bind_endpoint": ep,
+        "changed": changed,
+    }))
+}
+
 /// ZeroMQ SUB/XSUB matching: a subscription matches a topic when it is a
 /// byte-prefix of it; an empty subscription matches everything. Mirrors
 /// libzmq's prefix filter without a socket.
@@ -1244,6 +1288,7 @@ export!(zmq__has => op_has);
 export!(zmq__request => op_request);
 export!(zmq__parse_endpoint => op_parse_endpoint);
 export!(zmq__build_endpoint => op_build_endpoint);
+export!(zmq__endpoint_bind_to_connect => op_endpoint_bind_to_connect);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__topic_match_any => op_topic_match_any);
 export!(zmq__valid_socket_type => op_valid_socket_type);
@@ -1793,6 +1838,56 @@ mod tests {
         .contains("empty host"));
         assert!(err_of(&call(zmq__build_endpoint, r#"{"transport":"tcp"}"#))
             .contains("missing address or host"));
+    }
+
+    #[test]
+    fn endpoint_bind_to_connect_rewrites_wildcard_hosts() {
+        let conn = |ep: &str| {
+            call(
+                zmq__endpoint_bind_to_connect,
+                &format!(r#"{{"endpoint":"{ep}"}}"#),
+            )["endpoint"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Each wildcard host → localhost, port preserved.
+        assert_eq!(conn("tcp://*:5555"), "tcp://localhost:5555");
+        assert_eq!(conn("tcp://0.0.0.0:5555"), "tcp://localhost:5555");
+        assert_eq!(conn("tcp://[::]:5555"), "tcp://localhost:5555");
+        // A `*` ephemeral-port wildcard is preserved (runtime-only).
+        assert_eq!(conn("tcp://*:*"), "tcp://localhost:*");
+        // Concrete hosts (incl. an IPv6 literal and an interface name) are untouched.
+        assert_eq!(conn("tcp://localhost:5555"), "tcp://localhost:5555");
+        assert_eq!(conn("tcp://[::1]:5555"), "tcp://[::1]:5555");
+        assert_eq!(conn("tcp://eth0:5555"), "tcp://eth0:5555");
+        // Non-IP transports pass through; `changed` reflects no rewrite.
+        let ipc = call(
+            zmq__endpoint_bind_to_connect,
+            r#"{"endpoint":"ipc:///tmp/s"}"#,
+        );
+        assert_eq!(ipc["endpoint"], json!("ipc:///tmp/s"));
+        assert_eq!(ipc["changed"], json!(false));
+        let tcp = call(
+            zmq__endpoint_bind_to_connect,
+            r#"{"endpoint":"tcp://*:5555"}"#,
+        );
+        assert_eq!(tcp["changed"], json!(true));
+        assert_eq!(tcp["bind_endpoint"], json!("tcp://*:5555"));
+        // A custom connect host is honored.
+        assert_eq!(
+            call(
+                zmq__endpoint_bind_to_connect,
+                r#"{"endpoint":"tcp://0.0.0.0:9000","host":"broker.internal"}"#
+            )["endpoint"],
+            json!("tcp://broker.internal:9000")
+        );
+        // Malformed endpoint errors.
+        assert!(err_of(&call(
+            zmq__endpoint_bind_to_connect,
+            r#"{"endpoint":"no-scheme"}"#
+        ))
+        .contains("not a ZMQ endpoint"));
     }
 
     #[test]

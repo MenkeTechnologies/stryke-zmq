@@ -290,6 +290,15 @@ fn Zmq::build_endpoint (%opts) {
     Zmq::_decode("build_endpoint", zmq__build_endpoint(to_json(\%opts)))
 }
 
+## Rewrite a bind $endpoint into a connectable one: a wildcard bind host
+## (*, 0.0.0.0, ::, [::]) becomes a concrete host (%opts host, default
+## localhost); the port is preserved. Non-IP transports and concrete hosts pass
+## through. Returns a hashref { endpoint, bind_endpoint, changed }.
+fn Zmq::endpoint_bind_to_connect ($endpoint, %opts) {
+    Zmq::_decode("endpoint_bind_to_connect",
+        zmq__endpoint_bind_to_connect(to_json({ endpoint => $endpoint, host => $opts{host} })))
+}
+
 ## True if $subscription is a byte-prefix of $topic (ZMQ SUB matching).
 ## An empty subscription matches everything.
 fn Zmq::topic_match ($subscription, $topic) {

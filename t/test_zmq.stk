@@ -109,6 +109,14 @@ assert_eq Zmq::build_endpoint(transport => "ipc", address => "/tmp/feeds/0")->{e
 assert_eq Zmq::build_endpoint(transport => "inproc", host => "workers")->{endpoint}, "inproc://workers", "build_endpoint: host without port omits colon"
 assert_dies fn { Zmq::build_endpoint(transport => "tcp", host => "") }, "build_endpoint: rejects empty host"
 
+# endpoint_bind_to_connect: rewrite a wildcard bind host to a connectable one.
+assert_eq Zmq::endpoint_bind_to_connect("tcp://*:5555")->{endpoint}, "tcp://localhost:5555", "endpoint_bind_to_connect: * → localhost"
+assert_eq Zmq::endpoint_bind_to_connect("tcp://0.0.0.0:5555")->{endpoint}, "tcp://localhost:5555", "endpoint_bind_to_connect: 0.0.0.0 → localhost"
+assert_eq Zmq::endpoint_bind_to_connect("tcp://localhost:5555")->{changed}, 0, "endpoint_bind_to_connect: concrete host unchanged"
+assert_eq Zmq::endpoint_bind_to_connect("ipc:///tmp/s")->{endpoint}, "ipc:///tmp/s", "endpoint_bind_to_connect: non-IP transport passes through"
+assert_eq Zmq::endpoint_bind_to_connect("tcp://*:9000", host => "broker")->{endpoint}, "tcp://broker:9000", "endpoint_bind_to_connect: custom connect host"
+assert_dies fn { Zmq::endpoint_bind_to_connect("no-scheme") }, "endpoint_bind_to_connect: rejects a malformed endpoint"
+
 assert_eq Zmq::topic_match("weather.", "weather.us.ny"), 1, "topic_match: prefix matches"
 assert_eq Zmq::topic_match("sports.", "weather.us"),     0, "topic_match: non-prefix fails"
 assert_eq Zmq::topic_match("", "anything"),              1, "topic_match: empty matches all"
