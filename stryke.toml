@@ -1,6 +1,6 @@
 [package]
 name = "stryke-zmq"
-version = "0.12.0"
+version = "0.13.0"
 description = "ZeroMQ client for stryke. Brokerless messaging — req/rep, pub/sub, push/pull, dealer/router, pair — over a persistent in-process socket registry. cdylib loaded on first `use Zmq`; libzmq vendored, no system dependency."
 authors = ["MenkeTechnologies"]
 license = "MIT"
@@ -35,6 +35,7 @@ exports = [
     "zmq__proxy",
     "zmq__curve_keypair",
     "zmq__curve_public",
+    "zmq__valid_curve_key",
     "zmq__z85_encode",
     "zmq__z85_decode",
     "zmq__z85_valid",

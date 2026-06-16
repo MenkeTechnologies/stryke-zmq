@@ -240,6 +240,14 @@ fn Zmq::curve_public ($secret) {
     Zmq::_decode("curve_public", zmq__curve_public(to_json({ secret => $secret })))
 }
 
+## Validate a CURVE $key (public or secret) — exactly 40 z85 characters, the
+## encoding of a 32-byte key. Stricter than z85_valid (which accepts any
+## multiple-of-5 length); this enforces the CURVE key size. Returns a hashref
+## { key, valid, reason } (reason undef when valid).
+fn Zmq::valid_curve_key ($key) {
+    Zmq::_decode("valid_curve_key", zmq__valid_curve_key(to_json({ key => $key })))
+}
+
 ## z85-encode bytes. opts: encoding => how $data is framed ("utf8"|"hex"|
 ## "base64", default utf8). Input length must be a multiple of 4. Returns
 ## the z85 string.

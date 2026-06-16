@@ -196,6 +196,13 @@ if (Zmq::has("curve")) {
 # The 40-char/Z85 validation runs before the FFI, so a bad secret dies regardless.
 assert_dies fn { Zmq::curve_public("too-short") }, "curve_public: rejects a non-40-char secret"
 
+# valid_curve_key: a CURVE key is exactly 40 Z85 chars (non-throwing predicate).
+assert_ok Zmq::valid_curve_key("HelloWorld" x 4)->{valid}, "valid_curve_key: 40 Z85 chars is a valid key"
+val $vshort = Zmq::valid_curve_key("HelloWorld")
+assert_eq $vshort->{valid}, 0,                "valid_curve_key: 10 chars (valid z85) is too short for a CURVE key"
+assert_match qr/40/, $vshort->{reason},       "valid_curve_key: reason names the 40-char requirement"
+assert_eq Zmq::valid_curve_key(" " x 40)->{valid}, 0, "valid_curve_key: rejects a non-Z85 character (space) at the right length"
+
 # socket_caps: messaging pattern + send/recv directionality (zmq_socket(3)).
 val $pubc = Zmq::socket_caps("pub")
 assert_eq $pubc->{pattern},  "publish-subscribe", "socket_caps: pub pattern"

@@ -164,6 +164,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::curve_public($secret)` | hashref | `{ secret, public }` — derive the public key from a z85 secret (`zmq_curve_public`) |
 | `Zmq::z85_encode($data, %opts)` / `Zmq::z85_decode($z85, %opts)` | string | z85 codec; opts: `encoding` |
 | `Zmq::z85_valid($z85)` | `{ z85, valid, reason }` | structural RFC-32 check: length ÷5 and Z85 alphabet (non-throwing predicate) |
+| `Zmq::valid_curve_key($key)` | `{ key, valid, reason }` | a CURVE key is exactly 40 Z85 chars (32 bytes); stricter than `z85_valid` |
 | `Zmq::request($endpoint, $data, %opts)` | string \| undef | one-shot REQ round-trip; opts: timeout_ms (default 5000), encoding |
 | `Zmq::parse_endpoint($endpoint)` | hashref | `{ transport, address, known_transport, host?, port? }` — no socket |
 | `Zmq::build_endpoint(%opts)` | hashref | `{ endpoint, known_transport }` — inverse of parse_endpoint; opts: transport, address \| host + port |

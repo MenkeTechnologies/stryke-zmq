@@ -838,12 +838,39 @@ extern "C" {
 /// is stored. A CURVE secret is exactly 40 Z85 chars (32 raw Curve25519 bytes);
 /// the public is a deterministic function of it. opts: `secret` (required).
 /// Returns `{secret, public}`. Pure (no socket, no I/O).
+/// The validity reason for a CURVE key, or `None` when valid: a CURVE key is
+/// exactly 40 Z85 characters (the encoding of a 32-byte key). Shared by
+/// `valid_curve_key` and the `curve_public` secret-key guard.
+fn curve_key_reason(s: &str) -> Option<&'static str> {
+    if s.len() != 40 {
+        Some("must be exactly 40 characters (a 32-byte Z85 key)")
+    } else if !s.chars().all(|c| Z85_ALPHABET.contains(c)) {
+        Some("contains a character outside the Z85 alphabet")
+    } else {
+        None
+    }
+}
+
+/// Validate a CURVE key (public or secret) — exactly 40 Z85 characters, the
+/// encoding of a 32-byte key. Distinct from `z85_valid`, which accepts any
+/// multiple-of-5 length; this enforces the CURVE key size. The validator
+/// companion of `curve_keypair`/`curve_public`. opts: `key` (or `z85`/`value`,
+/// required). Returns `{key, valid, reason}`. Pure.
+fn op_valid_curve_key(opts: Value) -> Result<Value> {
+    let key = opts
+        .get("key")
+        .or_else(|| opts.get("z85"))
+        .or_else(|| opts.get("value"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing key"))?;
+    let reason = curve_key_reason(key);
+    Ok(json!({"key": key, "valid": reason.is_none(), "reason": reason}))
+}
+
 fn op_curve_public(opts: Value) -> Result<Value> {
     let secret = req_str(&opts, "secret")?.to_string();
-    if secret.len() != 40 || !secret.chars().all(|c| Z85_ALPHABET.contains(c)) {
-        return Err(anyhow!(
-            "secret must be a 40-character Z85 CURVE key (32 bytes)"
-        ));
+    if let Some(r) = curve_key_reason(&secret) {
+        return Err(anyhow!("secret {r}"));
     }
     let c_secret =
         std::ffi::CString::new(secret.as_bytes()).map_err(|_| anyhow!("secret contains a NUL"))?;
@@ -1339,6 +1366,7 @@ export!(zmq__monitor_recv => op_monitor_recv);
 export!(zmq__proxy => op_proxy);
 export!(zmq__curve_keypair => op_curve_keypair);
 export!(zmq__curve_public => op_curve_public);
+export!(zmq__valid_curve_key => op_valid_curve_key);
 export!(zmq__z85_encode => op_z85_encode);
 export!(zmq__z85_decode => op_z85_decode);
 export!(zmq__z85_valid => op_z85_valid);
@@ -1758,6 +1786,32 @@ mod tests {
             json!(true)
         );
         assert!(err_of(&call(zmq__z85_valid, "{}")).contains("z85"));
+    }
+
+    #[test]
+    fn valid_curve_key_requires_40_z85_chars() {
+        // 40 valid Z85 characters → a well-formed CURVE key.
+        let key40 = "HelloWorld".repeat(4);
+        assert_eq!(
+            call(zmq__valid_curve_key, &format!(r#"{{"key":"{key40}"}}"#))["valid"],
+            json!(true)
+        );
+        // z85_valid accepts a 10-char multiple-of-5 string, but a CURVE key must be
+        // exactly 40 — the distinguishing constraint.
+        let short = call(zmq__valid_curve_key, r#"{"key":"HelloWorld"}"#);
+        assert_eq!(short["valid"], json!(false));
+        assert!(short["reason"].as_str().unwrap().contains("40"));
+        // Right length, but a character outside the Z85 alphabet (backtick).
+        let badchar = "`".repeat(40);
+        let bad = call(zmq__valid_curve_key, &format!(r#"{{"key":"{badchar}"}}"#));
+        assert_eq!(bad["valid"], json!(false));
+        assert!(bad["reason"].as_str().unwrap().contains("Z85 alphabet"));
+        // `z85`/`value` aliases and the missing-arg error.
+        assert_eq!(
+            call(zmq__valid_curve_key, &format!(r#"{{"z85":"{key40}"}}"#))["valid"],
+            json!(true)
+        );
+        assert!(err_of(&call(zmq__valid_curve_key, "{}")).contains("key"));
     }
 
     /// `lib_version` reports a libzmq ≥ 4 (the vendored zeromq-src is 4.x),
