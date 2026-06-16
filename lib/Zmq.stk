@@ -342,6 +342,17 @@ fn Zmq::topic_overlaps ($a, $b) {
         zmq__topic_overlaps(to_json({ a => $a, b => $b })))
 }
 
+## Reduce \@subscriptions to the minimal covering set — drop any subscription a
+## strictly-shorter one already subsumes (a SUB socket matches a topic when ANY
+## subscription is a prefix of it, so "a" makes "ab" redundant and an empty ""
+## subsumes everything). Builds on the topic_overlaps subsumption rule; duplicates
+## collapse and first-appearance order is preserved. Returns a hashref
+## { pruned, removed } — pruned is the minimal set, removed the redundant ones.
+fn Zmq::prune_subscriptions ($subscriptions) {
+    Zmq::_decode("prune_subscriptions",
+        zmq__prune_subscriptions(to_json({ subscriptions => $subscriptions })))
+}
+
 ## Which of \@subscriptions match $topic (the set form a publisher uses to route
 ## a message under ZMQ XPUB). A subscription matches when it is a byte-prefix of
 ## the topic. Returns a hashref { topic, match, matched } where match is true if

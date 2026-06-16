@@ -150,6 +150,14 @@ assert_eq $eq->{overlaps}, 1,   "topic_overlaps: identical subscriptions overlap
 assert_eq $eq->{subsumes}, "a", "topic_overlaps: identical → a subsumes"
 assert_ok !defined(Zmq::topic_overlaps("a", "b")->{subsumes}), "topic_overlaps: no subsumer when disjoint"
 
+# prune_subscriptions: reduce a subscription set to its minimal cover.
+val $pr = Zmq::prune_subscriptions(["weather.", "weather.us", "weather.us.ny", "sports."])
+assert_eq join(",", @{ $pr->{pruned} }),  "weather.,sports.",          "prune_subscriptions: keeps the broad subs"
+assert_eq join(",", @{ $pr->{removed} }), "weather.us,weather.us.ny",  "prune_subscriptions: drops the subsumed subs"
+assert_eq join(",", @{ Zmq::prune_subscriptions(["ab", "a", "b"])->{pruned} }), "a,b", "prune_subscriptions: order-independent subsumption (later broad sub wins)"
+assert_eq join(",", @{ Zmq::prune_subscriptions(["", "a", "b.c"])->{pruned} }), "",    "prune_subscriptions: empty subscription collapses the whole set"
+assert_eq join(",", @{ Zmq::prune_subscriptions(["x", "x", "y"])->{pruned} }), "x,y",  "prune_subscriptions: duplicates collapse"
+
 # topic_match_any: XPUB set routing — which subscriptions match a topic.
 val $tm = Zmq::topic_match_any("weather.us.ny", ["weather.", "sports.", "weather.us"])
 assert_eq $tm->{match}, 1,                          "topic_match_any: at least one matched"

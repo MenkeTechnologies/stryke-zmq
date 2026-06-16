@@ -173,6 +173,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::valid_endpoint($endpoint)` | hashref | `{ endpoint, valid, reason, transport }` — strict transport-syntax check (stricter than parse_endpoint): known transport, host+port (`*` or 1-65535) for tcp/udp/ws/wss, non-empty path/name/address otherwise |
 | `Zmq::topic_match($subscription, $topic)` | 1 \| "" | ZMQ SUB prefix match (empty subscription matches all) |
 | `Zmq::topic_overlaps($a, $b)` | hashref | `{ a, b, overlaps, subsumes }` — true when one prefix subscription subsumes the other (prune redundant subs); `subsumes` is the broader (shorter) one |
+| `Zmq::prune_subscriptions(\@subscriptions)` | hashref | `{ pruned, removed }` — reduce a subscription set to its minimal cover, dropping any subscription a strictly-shorter one subsumes (an empty `""` subsumes everything); duplicates collapse, order preserved |
 | `Zmq::topic_match_any($topic, \@subscriptions)` | `{ topic, match, matched }` | XPUB set routing: which subscriptions prefix-match the topic (in input order) |
 | `Zmq::build_subscription($topic, %opts)` | `{ frame, subscribe, topic }` | SUB/XSUB wire frame: leading `\x01` (subscribe; `subscribe => 0` for `\x00`) + topic; pure stryke (control byte via `chr`) |
 | `Zmq::parse_subscription($frame)` | `{ subscribe, topic, frame }` | inverse: split the leading 1/0 action byte from the topic |

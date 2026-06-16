@@ -1218,6 +1218,37 @@ fn op_topic_overlaps(opts: Value) -> Result<Value> {
     Ok(json!({"a": a, "b": b, "overlaps": overlaps, "subsumes": subsumes}))
 }
 
+/// Reduce a set of prefix `subscriptions` to its minimal cover — drop any
+/// subscription that a strictly-shorter one already subsumes, since a SUB socket
+/// matches a topic when ANY subscription is a prefix of it (so `"a"` makes `"ab"`
+/// redundant, and an empty `""` subscription subsumes everything). Builds on the
+/// `topic_overlaps` subsumption rule. Duplicates collapse; first-appearance order
+/// is preserved. opts: `subscriptions` (array of strings). Returns `{pruned,
+/// removed}` — `pruned` is the minimal covering set, `removed` lists the
+/// subscriptions dropped as redundant. Pure.
+fn op_prune_subscriptions(opts: Value) -> Result<Value> {
+    let subs = opts
+        .get("subscriptions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("missing subscriptions (array)"))?;
+    let mut uniq: Vec<String> = Vec::new();
+    for s in subs {
+        let st = s
+            .as_str()
+            .ok_or_else(|| anyhow!("each subscription must be a string"))?;
+        if !uniq.iter().any(|u| u == st) {
+            uniq.push(st.to_string());
+        }
+    }
+    // Keep S iff no OTHER unique subscription is a strictly-shorter prefix of it.
+    let (pruned, removed): (Vec<String>, Vec<String>) = uniq.iter().cloned().partition(|s| {
+        !uniq
+            .iter()
+            .any(|p| p.len() < s.len() && s.as_bytes().starts_with(p.as_bytes()))
+    });
+    Ok(json!({ "pruned": pruned, "removed": removed }))
+}
+
 /// ZeroMQ XPUB routing: which of a set of `subscriptions` match a `topic`. A
 /// subscription matches when it is a byte-prefix of the topic (an empty
 /// subscription matches everything), exactly as `topic_match` does for one — this
@@ -1439,6 +1470,7 @@ export!(zmq__endpoint_connect_to_bind => op_endpoint_connect_to_bind);
 export!(zmq__valid_endpoint => op_valid_endpoint);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__topic_overlaps => op_topic_overlaps);
+export!(zmq__prune_subscriptions => op_prune_subscriptions);
 export!(zmq__topic_match_any => op_topic_match_any);
 export!(zmq__valid_socket_type => op_valid_socket_type);
 export!(zmq__socket_types_compatible => op_socket_types_compatible);
@@ -2199,6 +2231,40 @@ mod tests {
         let empty = call(zmq__topic_overlaps, r#"{"a":"","b":"anything"}"#);
         assert_eq!(empty["overlaps"], json!(true));
         assert_eq!(empty["subsumes"], json!("a"));
+    }
+
+    #[test]
+    fn prune_subscriptions_drops_subsumed_prefixes() {
+        // `weather.` subsumes `weather.us` and `weather.us.ny`; `sports.` stays.
+        let v = call(
+            zmq__prune_subscriptions,
+            r#"{"subscriptions":["weather.","weather.us","weather.us.ny","sports."]}"#,
+        );
+        assert_eq!(v["pruned"], json!(["weather.", "sports."]));
+        assert_eq!(v["removed"], json!(["weather.us", "weather.us.ny"]));
+        // First-appearance order is preserved even when the broad sub comes later.
+        let order = call(
+            zmq__prune_subscriptions,
+            r#"{"subscriptions":["ab","a","b"]}"#,
+        );
+        assert_eq!(order["pruned"], json!(["a", "b"]));
+        assert_eq!(order["removed"], json!(["ab"]));
+        // An empty subscription collapses the whole set to just itself.
+        let all = call(
+            zmq__prune_subscriptions,
+            r#"{"subscriptions":["","a","b.c"]}"#,
+        );
+        assert_eq!(all["pruned"], json!([""]));
+        // Duplicates collapse; nothing is subsumed.
+        let dup = call(
+            zmq__prune_subscriptions,
+            r#"{"subscriptions":["x","x","y"]}"#,
+        );
+        assert_eq!(dup["pruned"], json!(["x", "y"]));
+        assert_eq!(dup["removed"], json!([]));
+        // Missing arg errors.
+        let err = call(zmq__prune_subscriptions, r#"{}"#);
+        assert!(err.get("error").is_some(), "missing subscriptions errors");
     }
 
     #[test]

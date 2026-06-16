@@ -52,6 +52,7 @@ assert_ok exists &Zmq::endpoint_connect_to_bind, "Zmq::endpoint_connect_to_bind 
 assert_ok exists &Zmq::valid_endpoint, "Zmq::valid_endpoint exists"
 assert_ok exists &Zmq::topic_match, "Zmq::topic_match exists"
 assert_ok exists &Zmq::topic_overlaps, "Zmq::topic_overlaps exists"
+assert_ok exists &Zmq::prune_subscriptions, "Zmq::prune_subscriptions exists"
 assert_ok exists &Zmq::topic_match_any, "Zmq::topic_match_any exists"
 assert_ok exists &Zmq::build_subscription, "Zmq::build_subscription exists"
 assert_ok exists &Zmq::parse_subscription, "Zmq::parse_subscription exists"
