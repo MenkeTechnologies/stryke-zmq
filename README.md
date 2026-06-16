@@ -161,6 +161,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::monitor_recv($handle, %opts)` | hashref \| undef | decode one event `{ event, value, endpoint }` from a monitor PAIR |
 | `Zmq::proxy($frontend, $backend, %opts)` | hashref | backgrounded `zmq_proxy` device; opts: `capture`, `control` (steerable) |
 | `Zmq::curve_keypair()` | hashref | `{ public, secret }` z85 keys (needs libsodium-enabled libzmq) |
+| `Zmq::curve_public($secret)` | hashref | `{ secret, public }` — derive the public key from a z85 secret (`zmq_curve_public`) |
 | `Zmq::z85_encode($data, %opts)` / `Zmq::z85_decode($z85, %opts)` | string | z85 codec; opts: `encoding` |
 | `Zmq::z85_valid($z85)` | `{ z85, valid, reason }` | structural RFC-32 check: length ÷5 and Z85 alphabet (non-throwing predicate) |
 | `Zmq::request($endpoint, $data, %opts)` | string \| undef | one-shot REQ round-trip; opts: timeout_ms (default 5000), encoding |

@@ -151,6 +151,16 @@ assert_eq Zmq::z85_valid("")->{valid},           1, "z85_valid: empty string is 
 assert_eq Zmq::z85_valid("Hello1")->{valid},     0, "z85_valid: length must be a multiple of 5"
 assert_eq Zmq::z85_valid(Zmq::z85_encode("cafebabe", encoding => "hex"))->{valid}, 1, "z85_valid: a real encoded string passes"
 
+# curve_public: re-derive the public key from a secret (companion of curve_keypair).
+# Gated on CURVE support since deriving needs libsodium-enabled libzmq.
+if (Zmq::has("curve")) {
+    val $kp  = Zmq::curve_keypair()
+    val $pub = Zmq::curve_public($kp->{secret})
+    assert_eq $pub->{public}, $kp->{public}, "curve_public: re-derives the keypair's public key"
+}
+# The 40-char/Z85 validation runs before the FFI, so a bad secret dies regardless.
+assert_dies fn { Zmq::curve_public("too-short") }, "curve_public: rejects a non-40-char secret"
+
 # socket_caps: messaging pattern + send/recv directionality (zmq_socket(3)).
 val $pubc = Zmq::socket_caps("pub")
 assert_eq $pubc->{pattern},  "publish-subscribe", "socket_caps: pub pattern"

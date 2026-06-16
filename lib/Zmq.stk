@@ -233,6 +233,13 @@ fn Zmq::curve_keypair {
     Zmq::_decode("curve_keypair", zmq__curve_keypair("{}"))
 }
 
+## Derive the CURVE public key from a $secret (40-char z85) — the companion of
+## curve_keypair for when only the secret was persisted. Returns { secret,
+## public }. Requires a libsodium-enabled libzmq.
+fn Zmq::curve_public ($secret) {
+    Zmq::_decode("curve_public", zmq__curve_public(to_json({ secret => $secret })))
+}
+
 ## z85-encode bytes. opts: encoding => how $data is framed ("utf8"|"hex"|
 ## "base64", default utf8). Input length must be a multiple of 4. Returns
 ## the z85 string.

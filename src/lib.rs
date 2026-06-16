@@ -822,6 +822,46 @@ fn op_curve_keypair(_opts: Value) -> Result<Value> {
     Ok(json!({"public": public, "secret": secret}))
 }
 
+// libzmq's CURVE public-key derivation (`zmq_curve_public`, libzmq ≥ 4.2). The
+// high-level `zmq` 0.10 crate does not re-export it and `zmq-sys`'s `ffi` module
+// is private, so declare the extern directly — the symbol is already present in
+// the libzmq static archive that `zmq-sys` links into this cdylib.
+extern "C" {
+    fn zmq_curve_public(
+        z85_public_key: *mut std::os::raw::c_char,
+        z85_secret_key: *const std::os::raw::c_char,
+    ) -> std::os::raw::c_int;
+}
+
+/// Derive the Z85 CURVE public key from a Z85 secret key — libzmq's
+/// `zmq_curve_public`, the companion to `curve_keypair` for when only the secret
+/// is stored. A CURVE secret is exactly 40 Z85 chars (32 raw Curve25519 bytes);
+/// the public is a deterministic function of it. opts: `secret` (required).
+/// Returns `{secret, public}`. Pure (no socket, no I/O).
+fn op_curve_public(opts: Value) -> Result<Value> {
+    let secret = req_str(&opts, "secret")?.to_string();
+    if secret.len() != 40 || !secret.chars().all(|c| Z85_ALPHABET.contains(c)) {
+        return Err(anyhow!(
+            "secret must be a 40-character Z85 CURVE key (32 bytes)"
+        ));
+    }
+    let c_secret =
+        std::ffi::CString::new(secret.as_bytes()).map_err(|_| anyhow!("secret contains a NUL"))?;
+    // libzmq writes 40 Z85 chars + a trailing NUL.
+    let mut public = [0u8; 41];
+    let rc = unsafe { zmq_curve_public(public.as_mut_ptr() as *mut _, c_secret.as_ptr()) };
+    if rc != 0 {
+        return Err(anyhow!(
+            "zmq_curve_public failed (libzmq built without CURVE support?)"
+        ));
+    }
+    let nul = public.iter().position(|&b| b == 0).unwrap_or(public.len());
+    let public = std::str::from_utf8(&public[..nul])
+        .map_err(|_| anyhow!("libzmq returned a non-UTF8 key"))?
+        .to_string();
+    Ok(json!({"secret": secret, "public": public}))
+}
+
 fn op_z85_encode(opts: Value) -> Result<Value> {
     let bytes = payload_to_bytes(&opts, req_str(&opts, "data")?)?;
     let z = zmq::z85_encode(&bytes).map_err(|e| anyhow!("{e}"))?;
@@ -1195,6 +1235,7 @@ export!(zmq__monitor => op_monitor);
 export!(zmq__monitor_recv => op_monitor_recv);
 export!(zmq__proxy => op_proxy);
 export!(zmq__curve_keypair => op_curve_keypair);
+export!(zmq__curve_public => op_curve_public);
 export!(zmq__z85_encode => op_z85_encode);
 export!(zmq__z85_decode => op_z85_decode);
 export!(zmq__z85_valid => op_z85_valid);
@@ -1547,6 +1588,24 @@ mod tests {
             assert_eq!(public.len(), 40, "z85 public key is 40 chars");
             assert_eq!(secret.len(), 40, "z85 secret key is 40 chars");
             assert_ne!(public, secret);
+            // curve_public must re-derive exactly the public the pair carried
+            // (Curve25519 public is a deterministic function of the secret), and
+            // be stable across repeated calls.
+            let derived = call(zmq__curve_public, &format!(r#"{{"secret":"{secret}"}}"#));
+            assert_eq!(
+                derived["public"].as_str(),
+                Some(public),
+                "curve_public re-derives the keypair's public"
+            );
+            let again = call(zmq__curve_public, &format!(r#"{{"secret":"{secret}"}}"#));
+            assert_eq!(again["public"], derived["public"], "curve_public is stable");
+            // A malformed secret is rejected, not panicked.
+            assert!(
+                call(zmq__curve_public, r#"{"secret":"too-short"}"#)
+                    .get("error")
+                    .is_some(),
+                "curve_public rejects a non-40-char secret"
+            );
         } else {
             // Without CURVE the op must surface an error, never panic/null.
             let kp = call(zmq__curve_keypair, "{}");
