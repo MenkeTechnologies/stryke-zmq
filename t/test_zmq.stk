@@ -140,6 +140,16 @@ assert_eq Zmq::topic_match("weather.", "weather.us.ny"), 1, "topic_match: prefix
 assert_eq Zmq::topic_match("sports.", "weather.us"),     0, "topic_match: non-prefix fails"
 assert_eq Zmq::topic_match("", "anything"),              1, "topic_match: empty matches all"
 
+# topic_overlaps: whether two prefix subscriptions subsume each other.
+val $ov = Zmq::topic_overlaps("weather.", "weather.us")
+assert_eq $ov->{overlaps}, 1,   "topic_overlaps: a prefix of b overlaps"
+assert_eq $ov->{subsumes}, "a", "topic_overlaps: the shorter (weather.) subsumes the longer"
+assert_eq Zmq::topic_overlaps("weather.", "sports.")->{overlaps}, 0, "topic_overlaps: disjoint prefixes do not overlap"
+val $eq = Zmq::topic_overlaps("news", "news")
+assert_eq $eq->{overlaps}, 1,   "topic_overlaps: identical subscriptions overlap"
+assert_eq $eq->{subsumes}, "a", "topic_overlaps: identical → a subsumes"
+assert_ok !defined(Zmq::topic_overlaps("a", "b")->{subsumes}), "topic_overlaps: no subsumer when disjoint"
+
 # topic_match_any: XPUB set routing — which subscriptions match a topic.
 val $tm = Zmq::topic_match_any("weather.us.ny", ["weather.", "sports.", "weather.us"])
 assert_eq $tm->{match}, 1,                          "topic_match_any: at least one matched"

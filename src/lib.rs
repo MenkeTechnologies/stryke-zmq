@@ -1196,6 +1196,28 @@ fn op_topic_match(opts: Value) -> Result<Value> {
     Ok(json!({"subscription": sub, "topic": topic, "match": matched}))
 }
 
+/// Whether two ZMQ prefix subscriptions `a` and `b` overlap — true when one is a
+/// byte-prefix of the other, since every topic delivered to the longer is also
+/// delivered to the shorter. Lets you prune redundant subscriptions: if you hold
+/// `foo` you don't need `foobar`. `subsumes` names the broader (shorter)
+/// subscription that covers the other (`"a"` when they are identical). Matching
+/// is byte-wise, like `topic_match`. opts: `a`, `b`. Returns
+/// `{a, b, overlaps, subsumes}`. Pure.
+fn op_topic_overlaps(opts: Value) -> Result<Value> {
+    let a = req_str(&opts, "a")?;
+    let b = req_str(&opts, "b")?;
+    let (ab, bb) = (a.as_bytes(), b.as_bytes());
+    let overlaps = ab.starts_with(bb) || bb.starts_with(ab);
+    let subsumes = if !overlaps {
+        Value::Null
+    } else if ab.len() <= bb.len() {
+        json!("a")
+    } else {
+        json!("b")
+    };
+    Ok(json!({"a": a, "b": b, "overlaps": overlaps, "subsumes": subsumes}))
+}
+
 /// ZeroMQ XPUB routing: which of a set of `subscriptions` match a `topic`. A
 /// subscription matches when it is a byte-prefix of the topic (an empty
 /// subscription matches everything), exactly as `topic_match` does for one — this
@@ -1416,6 +1438,7 @@ export!(zmq__endpoint_bind_to_connect => op_endpoint_bind_to_connect);
 export!(zmq__endpoint_connect_to_bind => op_endpoint_connect_to_bind);
 export!(zmq__valid_endpoint => op_valid_endpoint);
 export!(zmq__topic_match => op_topic_match);
+export!(zmq__topic_overlaps => op_topic_overlaps);
 export!(zmq__topic_match_any => op_topic_match_any);
 export!(zmq__valid_socket_type => op_valid_socket_type);
 export!(zmq__socket_types_compatible => op_socket_types_compatible);
@@ -2153,6 +2176,29 @@ mod tests {
             r#"{"subscription":"","topic":"anything"}"#,
         );
         assert_eq!(all["match"], json!(true), "empty subscription matches all");
+    }
+
+    #[test]
+    fn topic_overlaps_detects_prefix_subsumption() {
+        // `weather.` is a prefix of `weather.us` → they overlap, shorter subsumes.
+        let ov = call(zmq__topic_overlaps, r#"{"a":"weather.","b":"weather.us"}"#);
+        assert_eq!(ov["overlaps"], json!(true));
+        assert_eq!(ov["subsumes"], json!("a"), "the shorter prefix subsumes");
+        // Order-independent: the broader one is still `subsumes`, now `b`.
+        let ov2 = call(zmq__topic_overlaps, r#"{"a":"weather.us","b":"weather."}"#);
+        assert_eq!(ov2["subsumes"], json!("b"));
+        // Disjoint prefixes don't overlap and have no subsumer.
+        let no = call(zmq__topic_overlaps, r#"{"a":"weather.","b":"sports."}"#);
+        assert_eq!(no["overlaps"], json!(false));
+        assert_eq!(no["subsumes"], Value::Null);
+        // Identical subscriptions overlap; `a` is reported as the subsumer.
+        let eq = call(zmq__topic_overlaps, r#"{"a":"news","b":"news"}"#);
+        assert_eq!(eq["overlaps"], json!(true));
+        assert_eq!(eq["subsumes"], json!("a"));
+        // The empty subscription subsumes everything.
+        let empty = call(zmq__topic_overlaps, r#"{"a":"","b":"anything"}"#);
+        assert_eq!(empty["overlaps"], json!(true));
+        assert_eq!(empty["subsumes"], json!("a"));
     }
 
     #[test]

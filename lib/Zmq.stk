@@ -332,6 +332,16 @@ fn Zmq::topic_match ($subscription, $topic) {
         zmq__topic_match(to_json({ subscription => $subscription, topic => $topic })))->{match}
 }
 
+## Whether two prefix subscriptions $a and $b overlap — true when one is a
+## byte-prefix of the other (every topic under the longer is also delivered to
+## the shorter), for pruning redundant subscriptions. Returns a hashref
+## { a, b, overlaps, subsumes } where subsumes names the broader (shorter)
+## subscription ("a" when identical), undef when they don't overlap.
+fn Zmq::topic_overlaps ($a, $b) {
+    Zmq::_decode("topic_overlaps",
+        zmq__topic_overlaps(to_json({ a => $a, b => $b })))
+}
+
 ## Which of \@subscriptions match $topic (the set form a publisher uses to route
 ## a message under ZMQ XPUB). A subscription matches when it is a byte-prefix of
 ## the topic. Returns a hashref { topic, match, matched } where match is true if
