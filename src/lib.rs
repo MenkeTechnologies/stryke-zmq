@@ -1090,6 +1090,43 @@ fn op_endpoint_bind_to_connect(opts: Value) -> Result<Value> {
     }))
 }
 
+/// Rewrite a ZMQ *connect* endpoint into a *bind* one — the inverse of
+/// `endpoint_bind_to_connect`. Replaces a concrete host with a bind wildcard
+/// (default `*`, override with `host`, e.g. `0.0.0.0`); an already-wildcard host
+/// passes through unchanged. Only the IP transports (tcp/udp/ws/wss) carry a host
+/// to rewrite; others (ipc/inproc/…) pass through. The port (including a `*`
+/// ephemeral-port wildcard) is preserved. With the default `*` wildcard it
+/// round-trips `endpoint_bind_to_connect`. opts: `endpoint` (required), optional
+/// `host`. Returns `{endpoint, connect_endpoint, changed}`. Pure.
+fn op_endpoint_connect_to_bind(opts: Value) -> Result<Value> {
+    let ep = req_str(&opts, "endpoint")?;
+    let bind_host = opts
+        .get("host")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("*");
+    let (transport, address) = ep
+        .split_once("://")
+        .ok_or_else(|| anyhow!("not a ZMQ endpoint (missing `://`): {ep}"))?;
+    let is_ip = matches!(transport, "tcp" | "udp" | "ws" | "wss");
+    let (new_address, changed) = if is_ip {
+        match address.rsplit_once(':') {
+            Some((host, port)) if !is_wildcard_host(host) => (format!("{bind_host}:{port}"), true),
+            None if !is_wildcard_host(address) && !address.is_empty() => {
+                (bind_host.to_string(), true)
+            }
+            _ => (address.to_string(), false),
+        }
+    } else {
+        (address.to_string(), false)
+    };
+    Ok(json!({
+        "endpoint": format!("{transport}://{new_address}"),
+        "connect_endpoint": ep,
+        "changed": changed,
+    }))
+}
+
 /// Validate a ZMQ endpoint string by transport syntax — stricter than
 /// `parse_endpoint`, which only splits and flags an unknown transport. Checks: a
 /// non-empty `transport://address`; a known transport (tcp/ipc/inproc/pgm/epgm/
@@ -1376,6 +1413,7 @@ export!(zmq__request => op_request);
 export!(zmq__parse_endpoint => op_parse_endpoint);
 export!(zmq__build_endpoint => op_build_endpoint);
 export!(zmq__endpoint_bind_to_connect => op_endpoint_bind_to_connect);
+export!(zmq__endpoint_connect_to_bind => op_endpoint_connect_to_bind);
 export!(zmq__valid_endpoint => op_valid_endpoint);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__topic_match_any => op_topic_match_any);
@@ -1999,6 +2037,67 @@ mod tests {
         // Malformed endpoint errors.
         assert!(err_of(&call(
             zmq__endpoint_bind_to_connect,
+            r#"{"endpoint":"no-scheme"}"#
+        ))
+        .contains("not a ZMQ endpoint"));
+    }
+
+    #[test]
+    fn endpoint_connect_to_bind_inverts_bind_to_connect() {
+        let bind = |ep: &str| {
+            call(
+                zmq__endpoint_connect_to_bind,
+                &format!(r#"{{"endpoint":"{ep}"}}"#),
+            )["endpoint"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // A concrete host becomes the `*` bind wildcard; the port is preserved.
+        assert_eq!(bind("tcp://localhost:5555"), "tcp://*:5555");
+        assert_eq!(bind("tcp://broker.internal:9000"), "tcp://*:9000");
+        // An IPv6 literal host (before the LAST colon) is replaced, port kept.
+        assert_eq!(bind("tcp://[::1]:5555"), "tcp://*:5555");
+        // An ephemeral-port wildcard is preserved.
+        assert_eq!(bind("tcp://localhost:*"), "tcp://*:*");
+        // An already-wildcard host is unchanged (idempotent).
+        let same = call(
+            zmq__endpoint_connect_to_bind,
+            r#"{"endpoint":"tcp://*:5555"}"#,
+        );
+        assert_eq!(same["endpoint"], json!("tcp://*:5555"));
+        assert_eq!(same["changed"], json!(false));
+        // A custom bind wildcard is honored.
+        assert_eq!(
+            call(
+                zmq__endpoint_connect_to_bind,
+                r#"{"endpoint":"tcp://host:80","host":"0.0.0.0"}"#
+            )["endpoint"],
+            json!("tcp://0.0.0.0:80")
+        );
+        // Non-IP transports pass through.
+        let ipc = call(
+            zmq__endpoint_connect_to_bind,
+            r#"{"endpoint":"ipc:///tmp/s"}"#,
+        );
+        assert_eq!(ipc["endpoint"], json!("ipc:///tmp/s"));
+        assert_eq!(ipc["changed"], json!(false));
+        // Round-trips bind_to_connect with the default wildcards.
+        for ep in ["tcp://*:5555", "tcp://0.0.0.0:9000", "udp://*:*"] {
+            let conn = call(
+                zmq__endpoint_bind_to_connect,
+                &format!(r#"{{"endpoint":"{ep}"}}"#),
+            )["endpoint"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            // bind_to_connect canonicalizes the wildcard host to `*`, so compare
+            // against the `*`-normalized bind form.
+            let want = ep.replacen("0.0.0.0", "*", 1);
+            assert_eq!(bind(&conn), want, "round-trip {ep}");
+        }
+        assert!(err_of(&call(
+            zmq__endpoint_connect_to_bind,
             r#"{"endpoint":"no-scheme"}"#
         ))
         .contains("not a ZMQ endpoint"));

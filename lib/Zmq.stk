@@ -307,6 +307,16 @@ fn Zmq::endpoint_bind_to_connect ($endpoint, %opts) {
         zmq__endpoint_bind_to_connect(to_json({ endpoint => $endpoint, host => $opts{host} })))
 }
 
+## Inverse of endpoint_bind_to_connect: rewrite a connect $endpoint into a bind
+## one by replacing a concrete host with a bind wildcard (%opts host, default
+## "*"; e.g. "0.0.0.0"); an already-wildcard host is unchanged. Only IP
+## transports (tcp/udp/ws/wss) carry a host; the port (incl. "*") is preserved.
+## Returns a hashref { endpoint, connect_endpoint, changed }.
+fn Zmq::endpoint_connect_to_bind ($endpoint, %opts) {
+    Zmq::_decode("endpoint_connect_to_bind",
+        zmq__endpoint_connect_to_bind(to_json({ endpoint => $endpoint, host => $opts{host} })))
+}
+
 ## Validate a ZMQ $endpoint by transport syntax — stricter than parse_endpoint.
 ## Checks transport://address, a known transport, host + port (* or 1-65535) for
 ## tcp/udp/ws/wss, a non-empty path/name/address otherwise. Returns a hashref
