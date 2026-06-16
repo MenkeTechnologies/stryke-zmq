@@ -141,6 +141,21 @@ assert_eq Zmq::topic_match_any("news.today", ["weather.", "sports."])->{match}, 
 assert_eq Zmq::topic_match_any("anything", ["x", ""])->{matched}[0], "", "topic_match_any: empty subscription matches all"
 assert_eq Zmq::topic_match_any("t", [])->{match}, 0, "topic_match_any: empty set never matches"
 
+# build_subscription / parse_subscription: SUB/XSUB wire frame (leading 1/0 byte).
+val $bs = Zmq::build_subscription("weather.us")
+assert_eq ord(substr($bs->{frame}, 0, 1)), 1,      "build_subscription: leading byte 1 = subscribe"
+assert_eq substr($bs->{frame}, 1), "weather.us",   "build_subscription: topic follows the action byte"
+assert_eq ord(substr(Zmq::build_subscription("x", subscribe => 0)->{frame}, 0, 1)), 0, "build_subscription: subscribe => 0 emits the \\x00 unsubscribe byte"
+val $ps = Zmq::parse_subscription($bs->{frame})
+assert_eq $ps->{subscribe}, 1,                     "parse_subscription: subscribe flag from the leading byte"
+assert_eq $ps->{topic}, "weather.us",              "parse_subscription: topic after the action byte"
+# Round-trips build_subscription, and the parsed topic feeds topic_match.
+val $rt = Zmq::parse_subscription(Zmq::build_subscription("news.")->{frame})
+assert_eq $rt->{topic}, "news.",                   "parse_subscription: round-trips build_subscription"
+assert_eq Zmq::topic_match($rt->{topic}, "news.today"), 1, "parse_subscription: parsed topic prefix-matches"
+assert_dies fn { Zmq::parse_subscription("") },    "parse_subscription: empty frame dies"
+assert_dies fn { Zmq::parse_subscription("Xtopic") }, "parse_subscription: a non-0/1 leading byte dies"
+
 val $vt = Zmq::valid_socket_type("PUBLISH")
 assert_ok $vt->{valid},               "valid_socket_type: alias is valid"
 assert_eq $vt->{canonical}, "pub",    "valid_socket_type: canonicalizes"

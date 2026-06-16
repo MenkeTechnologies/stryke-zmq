@@ -171,6 +171,8 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::valid_endpoint($endpoint)` | hashref | `{ endpoint, valid, reason, transport }` — strict transport-syntax check (stricter than parse_endpoint): known transport, host+port (`*` or 1-65535) for tcp/udp/ws/wss, non-empty path/name/address otherwise |
 | `Zmq::topic_match($subscription, $topic)` | 1 \| "" | ZMQ SUB prefix match (empty subscription matches all) |
 | `Zmq::topic_match_any($topic, \@subscriptions)` | `{ topic, match, matched }` | XPUB set routing: which subscriptions prefix-match the topic (in input order) |
+| `Zmq::build_subscription($topic, %opts)` | `{ frame, subscribe, topic }` | SUB/XSUB wire frame: leading `\x01` (subscribe; `subscribe => 0` for `\x00`) + topic; pure stryke (control byte via `chr`) |
+| `Zmq::parse_subscription($frame)` | `{ subscribe, topic, frame }` | inverse: split the leading 1/0 action byte from the topic |
 | `Zmq::valid_socket_type($type)` | hashref | `{ valid, canonical }` — aliases collapse (`publish` → `pub`) |
 | `Zmq::socket_peers($type)` | list | socket types `$type` can validly connect to (ZMQ messaging-pattern compatibility) |
 | `Zmq::socket_types_compatible($a, $b)` | 1 \| "" | whether types `$a` and `$b` can be connected as peers (REQ↔REP, PUB↔SUB, PUSH↔PULL, …) |

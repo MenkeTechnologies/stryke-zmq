@@ -323,6 +323,27 @@ fn Zmq::topic_match_any ($topic, $subscriptions) {
         zmq__topic_match_any(to_json({ topic => $topic, subscriptions => $subscriptions })))
 }
 
+## Build the SUB/XSUB subscription frame a subscriber sends to a publisher: a
+## leading \x01 (subscribe) or \x00 (unsubscribe) byte then the $topic prefix.
+## %opts: subscribe (default true). Pure stryke — the control byte is built with
+## chr() (it can't cross the JSON FFI boundary). Returns a hashref
+## { frame, subscribe, topic }.
+fn Zmq::build_subscription ($topic, %opts) {
+    val $sub = (($opts{subscribe} // 1) ? 1 : 0)
+    +{ frame => chr($sub) . $topic, subscribe => $sub, topic => $topic }
+}
+
+## Parse a SUB/XSUB subscription $frame — inverse of build_subscription. Leading
+## byte \x01 → subscribe, \x00 → unsubscribe; the rest is the topic. An empty
+## frame or a bad leading byte dies. Pure stryke (ord/substr on the raw bytes).
+## Returns a hashref { subscribe, topic, frame }.
+fn Zmq::parse_subscription ($frame) {
+    die "Zmq::parse_subscription: empty subscription frame" unless length($frame)
+    val $action = ord(substr($frame, 0, 1))
+    die "Zmq::parse_subscription: invalid action byte $action (want 0 or 1)" unless $action == 0 || $action == 1
+    +{ subscribe => $action, topic => substr($frame, 1), frame => $frame }
+}
+
 ## Validate a socket-type name → { valid, canonical }. Aliases (e.g.
 ## "publish") collapse to their canonical form ("pub").
 fn Zmq::valid_socket_type ($type) {
