@@ -158,6 +158,21 @@ assert_eq join(",", @{ Zmq::prune_subscriptions(["ab", "a", "b"])->{pruned} }), 
 assert_eq join(",", @{ Zmq::prune_subscriptions(["", "a", "b.c"])->{pruned} }), "",    "prune_subscriptions: empty subscription collapses the whole set"
 assert_eq join(",", @{ Zmq::prune_subscriptions(["x", "x", "y"])->{pruned} }), "x,y",  "prune_subscriptions: duplicates collapse"
 
+# parse_monitor_event: decode a zmq_socket_monitor event id + value + endpoint.
+val $ev = Zmq::parse_monitor_event(event => 0x20, value => 7, endpoint => "tcp://0.0.0.0:5555")
+assert_eq $ev->{name}, "accepted",                "parse_monitor_event: 0x20 → accepted"
+assert_eq $ev->{is_error}, 0,                     "parse_monitor_event: accepted is not an error"
+assert_eq $ev->{value_meaning}, "fd",             "parse_monitor_event: accepted value is an fd"
+assert_eq $ev->{value}, 7,                        "parse_monitor_event: value passes through"
+assert_eq $ev->{endpoint}, "tcp://0.0.0.0:5555",  "parse_monitor_event: endpoint passes through"
+val $bf = Zmq::parse_monitor_event(event => 0x10, value => 98)
+assert_eq $bf->{name}, "bind_failed",             "parse_monitor_event: 0x10 → bind_failed"
+assert_eq $bf->{is_error}, 1,                     "parse_monitor_event: bind_failed is an error"
+assert_eq $bf->{value_meaning}, "errno",          "parse_monitor_event: bind_failed value is an errno"
+assert_eq Zmq::parse_monitor_event(event => 0x04)->{value_meaning}, "reconnect_interval_ms", "parse_monitor_event: connect_retried value is a reconnect interval"
+assert_eq Zmq::parse_monitor_event(event => 0x4000)->{value_meaning}, "zap_status_code",      "parse_monitor_event: handshake_failed_auth value is a ZAP status"
+assert_dies fn { Zmq::parse_monitor_event(event => 3) }, "parse_monitor_event: rejects a non-flag id"
+
 # topic_match_any: XPUB set routing — which subscriptions match a topic.
 val $tm = Zmq::topic_match_any("weather.us.ny", ["weather.", "sports.", "weather.us"])
 assert_eq $tm->{match}, 1,                          "topic_match_any: at least one matched"

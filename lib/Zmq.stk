@@ -353,6 +353,16 @@ fn Zmq::prune_subscriptions ($subscriptions) {
         zmq__prune_subscriptions(to_json({ subscriptions => $subscriptions })))
 }
 
+## Decode a libzmq socket-monitor event. zmq_socket_monitor delivers each event
+## as a 16-bit id + 32-bit value (frame 1) plus the endpoint string (frame 2).
+## opts: event (required numeric id), value (optional), endpoint (optional).
+## Returns a hashref { event, name, is_error, value_meaning, value?, endpoint? }
+## naming the event and what its value carries (fd/errno/reconnect_interval_ms/
+## protocol_error_code/zap_status_code/none).
+fn Zmq::parse_monitor_event (%opts) {
+    Zmq::_decode("parse_monitor_event", zmq__parse_monitor_event(to_json(\%opts)))
+}
+
 ## Which of \@subscriptions match $topic (the set form a publisher uses to route
 ## a message under ZMQ XPUB). A subscription matches when it is a byte-prefix of
 ## the topic. Returns a hashref { topic, match, matched } where match is true if

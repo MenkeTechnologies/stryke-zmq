@@ -1249,6 +1249,64 @@ fn op_prune_subscriptions(opts: Value) -> Result<Value> {
     Ok(json!({ "pruned": pruned, "removed": removed }))
 }
 
+/// Decode a libzmq socket-monitor event. `zmq_socket_monitor` delivers each event
+/// as a two-frame message: frame 1 is a 16-bit event id followed by a 32-bit
+/// value, frame 2 is the affected endpoint string. This maps the numeric `event`
+/// id to its symbolic name (lowercase, `ZMQ_EVENT_` stripped), flags whether it is
+/// a failure, and names what the 32-bit `value` carries for that event — fd,
+/// errno, reconnect interval (ms), protocol-error code, or ZAP status — per the
+/// zmq_socket_monitor man page. opts: `event` (required integer id), `value`
+/// (optional 32-bit value), `endpoint` (optional string). Returns
+/// `{event, name, is_error, value_meaning, value?, endpoint?}`. Pure.
+fn op_parse_monitor_event(opts: Value) -> Result<Value> {
+    let event = opts
+        .get("event")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("missing event (integer monitor event id)"))?;
+    // (flag, name, is_error, value_meaning) — libzmq zmq.h ZMQ_EVENT_* ids; each
+    // monitor frame carries exactly one event, so we match the id exactly.
+    const EVENTS: &[(i64, &str, bool, &str)] = &[
+        (0x0001, "connected", false, "fd"),
+        (0x0002, "connect_delayed", false, "none"),
+        (0x0004, "connect_retried", false, "reconnect_interval_ms"),
+        (0x0008, "listening", false, "fd"),
+        (0x0010, "bind_failed", true, "errno"),
+        (0x0020, "accepted", false, "fd"),
+        (0x0040, "accept_failed", true, "errno"),
+        (0x0080, "closed", false, "fd"),
+        (0x0100, "close_failed", true, "errno"),
+        (0x0200, "disconnected", false, "fd"),
+        (0x0400, "monitor_stopped", false, "none"),
+        (0x0800, "handshake_failed_no_detail", true, "errno"),
+        (0x1000, "handshake_succeeded", false, "none"),
+        (
+            0x2000,
+            "handshake_failed_protocol",
+            true,
+            "protocol_error_code",
+        ),
+        (0x4000, "handshake_failed_auth", true, "zap_status_code"),
+    ];
+    let (name, is_error, value_meaning) = EVENTS
+        .iter()
+        .find(|(flag, ..)| *flag == event)
+        .map(|(_, n, e, v)| (*n, *e, *v))
+        .ok_or_else(|| anyhow!("unknown monitor event id 0x{event:04x}"))?;
+    let mut out = json!({
+        "event": event,
+        "name": name,
+        "is_error": is_error,
+        "value_meaning": value_meaning,
+    });
+    if let Some(v) = opts.get("value").and_then(Value::as_i64) {
+        out["value"] = json!(v);
+    }
+    if let Some(ep) = opts.get("endpoint").and_then(Value::as_str) {
+        out["endpoint"] = json!(ep);
+    }
+    Ok(out)
+}
+
 /// ZeroMQ XPUB routing: which of a set of `subscriptions` match a `topic`. A
 /// subscription matches when it is a byte-prefix of the topic (an empty
 /// subscription matches everything), exactly as `topic_match` does for one — this
@@ -1471,6 +1529,7 @@ export!(zmq__valid_endpoint => op_valid_endpoint);
 export!(zmq__topic_match => op_topic_match);
 export!(zmq__topic_overlaps => op_topic_overlaps);
 export!(zmq__prune_subscriptions => op_prune_subscriptions);
+export!(zmq__parse_monitor_event => op_parse_monitor_event);
 export!(zmq__topic_match_any => op_topic_match_any);
 export!(zmq__valid_socket_type => op_valid_socket_type);
 export!(zmq__socket_types_compatible => op_socket_types_compatible);
@@ -2265,6 +2324,40 @@ mod tests {
         // Missing arg errors.
         let err = call(zmq__prune_subscriptions, r#"{}"#);
         assert!(err.get("error").is_some(), "missing subscriptions errors");
+    }
+
+    #[test]
+    fn parse_monitor_event_decodes_id_value_and_endpoint() {
+        // ACCEPTED (0x20): value is an fd, not an error; endpoint passes through.
+        let acc = call(
+            zmq__parse_monitor_event,
+            r#"{"event":32,"value":7,"endpoint":"tcp://0.0.0.0:5555"}"#,
+        );
+        assert_eq!(acc["name"], json!("accepted"));
+        assert_eq!(acc["is_error"], json!(false));
+        assert_eq!(acc["value_meaning"], json!("fd"));
+        assert_eq!(acc["value"], json!(7));
+        assert_eq!(acc["endpoint"], json!("tcp://0.0.0.0:5555"));
+        // BIND_FAILED (0x10): error, value is an errno.
+        let bf = call(zmq__parse_monitor_event, r#"{"event":16,"value":98}"#);
+        assert_eq!(bf["name"], json!("bind_failed"));
+        assert_eq!(bf["is_error"], json!(true));
+        assert_eq!(bf["value_meaning"], json!("errno"));
+        assert!(bf.get("endpoint").is_none(), "endpoint omitted when absent");
+        // CONNECT_RETRIED (0x04): value is a reconnect interval in ms.
+        let cr = call(zmq__parse_monitor_event, r#"{"event":4}"#);
+        assert_eq!(cr["name"], json!("connect_retried"));
+        assert_eq!(cr["value_meaning"], json!("reconnect_interval_ms"));
+        assert!(cr.get("value").is_none(), "value omitted when absent");
+        // HANDSHAKE_FAILED_AUTH (0x4000): value is a ZAP status code.
+        let auth = call(zmq__parse_monitor_event, r#"{"event":16384,"value":400}"#);
+        assert_eq!(auth["name"], json!("handshake_failed_auth"));
+        assert_eq!(auth["value_meaning"], json!("zap_status_code"));
+        // Unknown id and missing id both error.
+        let unknown = call(zmq__parse_monitor_event, r#"{"event":3}"#);
+        assert!(unknown.get("error").is_some(), "non-flag id errors");
+        let missing = call(zmq__parse_monitor_event, r#"{}"#);
+        assert!(missing.get("error").is_some(), "missing event errors");
     }
 
     #[test]

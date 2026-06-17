@@ -174,6 +174,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::topic_match($subscription, $topic)` | 1 \| "" | ZMQ SUB prefix match (empty subscription matches all) |
 | `Zmq::topic_overlaps($a, $b)` | hashref | `{ a, b, overlaps, subsumes }` — true when one prefix subscription subsumes the other (prune redundant subs); `subsumes` is the broader (shorter) one |
 | `Zmq::prune_subscriptions(\@subscriptions)` | hashref | `{ pruned, removed }` — reduce a subscription set to its minimal cover, dropping any subscription a strictly-shorter one subsumes (an empty `""` subsumes everything); duplicates collapse, order preserved |
+| `Zmq::parse_monitor_event(event => $id, value => $v, endpoint => $ep)` | hashref | `{ event, name, is_error, value_meaning, value?, endpoint? }` — decode a `zmq_socket_monitor` event: map the 16-bit `ZMQ_EVENT_*` id to its symbolic `name`, flag failures, and name what the 32-bit `value` carries (`fd`, `errno`, `reconnect_interval_ms`, `protocol_error_code`, `zap_status_code`, or `none`); `value`/`endpoint` pass through when supplied |
 | `Zmq::topic_match_any($topic, \@subscriptions)` | `{ topic, match, matched }` | XPUB set routing: which subscriptions prefix-match the topic (in input order) |
 | `Zmq::build_subscription($topic, %opts)` | `{ frame, subscribe, topic }` | SUB/XSUB wire frame: leading `\x01` (subscribe; `subscribe => 0` for `\x00`) + topic; pure stryke (control byte via `chr`) |
 | `Zmq::parse_subscription($frame)` | `{ subscribe, topic, frame }` | inverse: split the leading 1/0 action byte from the topic |
