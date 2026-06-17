@@ -363,6 +363,15 @@ fn Zmq::parse_monitor_event (%opts) {
     Zmq::_decode("parse_monitor_event", zmq__parse_monitor_event(to_json(\%opts)))
 }
 
+## Build the event bitmask to pass to zmq_socket_monitor from a set of event
+## names — the setup-side companion to parse_monitor_event (which decodes a
+## received id). opts: names (arrayref of event names) or a single name; each maps
+## to its ZMQ_EVENT_* flag and they are OR'd, and "all" is the catch-all 0xFFFF.
+## Names are case-insensitive. Returns a hashref { mask, hex, events:[{name,flag}] }.
+fn Zmq::monitor_event_mask (%opts) {
+    Zmq::_decode("monitor_event_mask", zmq__monitor_event_mask(to_json(\%opts)))
+}
+
 ## Which of \@subscriptions match $topic (the set form a publisher uses to route
 ## a message under ZMQ XPUB). A subscription matches when it is a byte-prefix of
 ## the topic. Returns a hashref { topic, match, matched } where match is true if

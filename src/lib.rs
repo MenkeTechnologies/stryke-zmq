@@ -1258,36 +1258,38 @@ fn op_prune_subscriptions(opts: Value) -> Result<Value> {
 /// zmq_socket_monitor man page. opts: `event` (required integer id), `value`
 /// (optional 32-bit value), `endpoint` (optional string). Returns
 /// `{event, name, is_error, value_meaning, value?, endpoint?}`. Pure.
+/// libzmq `zmq.h` `ZMQ_EVENT_*` ids: `(flag, name, is_error, value_meaning)`. Each
+/// monitor frame carries exactly one event. Shared by `parse_monitor_event`
+/// (decode a received id) and `monitor_event_mask` (build the subscribe mask).
+const MONITOR_EVENTS: &[(i64, &str, bool, &str)] = &[
+    (0x0001, "connected", false, "fd"),
+    (0x0002, "connect_delayed", false, "none"),
+    (0x0004, "connect_retried", false, "reconnect_interval_ms"),
+    (0x0008, "listening", false, "fd"),
+    (0x0010, "bind_failed", true, "errno"),
+    (0x0020, "accepted", false, "fd"),
+    (0x0040, "accept_failed", true, "errno"),
+    (0x0080, "closed", false, "fd"),
+    (0x0100, "close_failed", true, "errno"),
+    (0x0200, "disconnected", false, "fd"),
+    (0x0400, "monitor_stopped", false, "none"),
+    (0x0800, "handshake_failed_no_detail", true, "errno"),
+    (0x1000, "handshake_succeeded", false, "none"),
+    (
+        0x2000,
+        "handshake_failed_protocol",
+        true,
+        "protocol_error_code",
+    ),
+    (0x4000, "handshake_failed_auth", true, "zap_status_code"),
+];
+
 fn op_parse_monitor_event(opts: Value) -> Result<Value> {
     let event = opts
         .get("event")
         .and_then(Value::as_i64)
         .ok_or_else(|| anyhow!("missing event (integer monitor event id)"))?;
-    // (flag, name, is_error, value_meaning) — libzmq zmq.h ZMQ_EVENT_* ids; each
-    // monitor frame carries exactly one event, so we match the id exactly.
-    const EVENTS: &[(i64, &str, bool, &str)] = &[
-        (0x0001, "connected", false, "fd"),
-        (0x0002, "connect_delayed", false, "none"),
-        (0x0004, "connect_retried", false, "reconnect_interval_ms"),
-        (0x0008, "listening", false, "fd"),
-        (0x0010, "bind_failed", true, "errno"),
-        (0x0020, "accepted", false, "fd"),
-        (0x0040, "accept_failed", true, "errno"),
-        (0x0080, "closed", false, "fd"),
-        (0x0100, "close_failed", true, "errno"),
-        (0x0200, "disconnected", false, "fd"),
-        (0x0400, "monitor_stopped", false, "none"),
-        (0x0800, "handshake_failed_no_detail", true, "errno"),
-        (0x1000, "handshake_succeeded", false, "none"),
-        (
-            0x2000,
-            "handshake_failed_protocol",
-            true,
-            "protocol_error_code",
-        ),
-        (0x4000, "handshake_failed_auth", true, "zap_status_code"),
-    ];
-    let (name, is_error, value_meaning) = EVENTS
+    let (name, is_error, value_meaning) = MONITOR_EVENTS
         .iter()
         .find(|(flag, ..)| *flag == event)
         .map(|(_, n, e, v)| (*n, *e, *v))
@@ -1305,6 +1307,48 @@ fn op_parse_monitor_event(opts: Value) -> Result<Value> {
         out["endpoint"] = json!(ep);
     }
     Ok(out)
+}
+
+/// Build the event bitmask to pass to `zmq_socket_monitor` from a set of event
+/// names — the setup-side companion to `parse_monitor_event` (which decodes a
+/// received id). Each name maps to its `ZMQ_EVENT_*` flag and they are OR'd
+/// together; `all` is the catch-all `0xFFFF` (libzmq's `ZMQ_EVENT_ALL`). Names
+/// are case-insensitive; an unknown name errors. opts: `names` (array of event
+/// names) or a single `name`. Returns `{mask, hex, events:[{name, flag}]}`. Pure.
+fn op_monitor_event_mask(opts: Value) -> Result<Value> {
+    let names: Vec<String> = if let Some(arr) = opts.get("names").and_then(Value::as_array) {
+        arr.iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow!("each event name must be a string"))
+            })
+            .collect::<Result<_>>()?
+    } else if let Some(n) = opts.get("name").and_then(Value::as_str) {
+        vec![n.to_string()]
+    } else {
+        return Err(anyhow!("missing names (array of event names) or name"));
+    };
+    let mut mask: i64 = 0;
+    let mut events: Vec<Value> = Vec::new();
+    for name in &names {
+        if name.eq_ignore_ascii_case("all") {
+            mask |= 0xFFFF;
+            events.push(json!({"name": "all", "flag": 0xFFFF}));
+            continue;
+        }
+        let entry = MONITOR_EVENTS
+            .iter()
+            .find(|e| e.1.eq_ignore_ascii_case(name))
+            .ok_or_else(|| anyhow!("unknown monitor event name `{name}`"))?;
+        mask |= entry.0;
+        events.push(json!({"name": entry.1, "flag": entry.0}));
+    }
+    Ok(json!({
+        "mask": mask,
+        "hex": format!("0x{mask:04x}"),
+        "events": events,
+    }))
 }
 
 /// ZeroMQ XPUB routing: which of a set of `subscriptions` match a `topic`. A
@@ -1530,6 +1574,7 @@ export!(zmq__topic_match => op_topic_match);
 export!(zmq__topic_overlaps => op_topic_overlaps);
 export!(zmq__prune_subscriptions => op_prune_subscriptions);
 export!(zmq__parse_monitor_event => op_parse_monitor_event);
+export!(zmq__monitor_event_mask => op_monitor_event_mask);
 export!(zmq__topic_match_any => op_topic_match_any);
 export!(zmq__valid_socket_type => op_valid_socket_type);
 export!(zmq__socket_types_compatible => op_socket_types_compatible);
@@ -2358,6 +2403,43 @@ mod tests {
         assert!(unknown.get("error").is_some(), "non-flag id errors");
         let missing = call(zmq__parse_monitor_event, r#"{}"#);
         assert!(missing.get("error").is_some(), "missing event errors");
+    }
+
+    #[test]
+    fn monitor_event_mask_ors_event_flags() {
+        // CONNECTED (0x0001) | DISCONNECTED (0x0200) = 0x0201.
+        let m = call(
+            zmq__monitor_event_mask,
+            r#"{"names":["connected","disconnected"]}"#,
+        );
+        assert_eq!(m["mask"], json!(0x0201));
+        assert_eq!(m["hex"], json!("0x0201"));
+        assert_eq!(m["events"].as_array().unwrap().len(), 2);
+        // `all` is the catch-all 0xFFFF (ZMQ_EVENT_ALL).
+        assert_eq!(
+            call(zmq__monitor_event_mask, r#"{"name":"all"}"#)["mask"],
+            json!(0xFFFF)
+        );
+        // A single name (case-insensitive) sets just its bit.
+        assert_eq!(
+            call(zmq__monitor_event_mask, r#"{"name":"ACCEPTED"}"#)["mask"],
+            json!(0x0020)
+        );
+        // Round-trips parse_monitor_event: each flag in the mask decodes to its name.
+        let one = call(
+            zmq__monitor_event_mask,
+            r#"{"name":"handshake_failed_auth"}"#,
+        );
+        let flag = one["mask"].as_i64().unwrap();
+        let back = call(zmq__parse_monitor_event, &format!(r#"{{"event":{flag}}}"#));
+        assert_eq!(back["name"], json!("handshake_failed_auth"));
+        // Unknown name and missing args error.
+        assert!(call(zmq__monitor_event_mask, r#"{"name":"nope"}"#)
+            .get("error")
+            .is_some());
+        assert!(call(zmq__monitor_event_mask, r#"{}"#)
+            .get("error")
+            .is_some());
     }
 
     #[test]
