@@ -393,6 +393,9 @@ fn get_one_opt(sock: &Socket, key: &str) -> Result<Value> {
         "heartbeat_ttl" => json!(sock.get_heartbeat_ttl()?),
         "heartbeat_timeout" => json!(sock.get_heartbeat_timeout()?),
         "tcp_keepalive" => json!(sock.get_tcp_keepalive()?),
+        "tcp_keepalive_cnt" => json!(sock.get_tcp_keepalive_cnt()?),
+        "tcp_keepalive_idle" => json!(sock.get_tcp_keepalive_idle()?),
+        "tcp_keepalive_intvl" => json!(sock.get_tcp_keepalive_intvl()?),
         "maxmsgsize" => json!(sock.get_maxmsgsize()?),
         "affinity" => json!(sock.get_affinity()?),
         "fd" => json!(sock.get_fd()?),
@@ -403,6 +406,8 @@ fn get_one_opt(sock: &Socket, key: &str) -> Result<Value> {
         "plain_username" => str_or_hex(sock.get_plain_username())?,
         "plain_password" => str_or_hex(sock.get_plain_password())?,
         "zap_domain" => str_or_hex(sock.get_zap_domain())?,
+        "gssapi_principal" => str_or_hex(sock.get_gssapi_principal())?,
+        "gssapi_service_principal" => str_or_hex(sock.get_gssapi_service_principal())?,
         "curve_publickey" => {
             json!(zmq::z85_encode(&sock.get_curve_publickey()?).map_err(|e| anyhow!("{e}"))?)
         }
@@ -1518,6 +1523,111 @@ fn op_socket_event_names(_opts: Value) -> Result<Value> {
     Ok(json!({ "events": events }))
 }
 
+/// The libzmq socket-option table this package exposes, as `(name, settable,
+/// gettable, value_type)`. Single source of truth for `socket_option_names` and
+/// `valid_socket_option`; mirrors the `set_one_opt`/`get_one_opt` match arms so
+/// the introspection never drifts from what those two actually accept. `kind` is
+/// the JSON value type a caller should pass to `set` / receive from `get`.
+const SOCKET_OPTIONS: &[(&str, bool, bool, &str)] = &[
+    // (name, settable, gettable, kind)
+    ("type", false, true, "string"),
+    ("rcvmore", false, true, "bool"),
+    ("fd", false, true, "int"),
+    ("mechanism", false, true, "string"),
+    ("last_endpoint", false, true, "string"),
+    ("sndhwm", true, true, "int"),
+    ("rcvhwm", true, true, "int"),
+    ("linger", true, true, "int"),
+    ("sndtimeo", true, true, "int"),
+    ("rcvtimeo", true, true, "int"),
+    ("sndbuf", true, true, "int"),
+    ("rcvbuf", true, true, "int"),
+    ("rate", true, true, "int"),
+    ("recovery_ivl", true, true, "int"),
+    ("reconnect_ivl", true, true, "int"),
+    ("reconnect_ivl_max", true, true, "int"),
+    ("backlog", true, true, "int"),
+    ("multicast_hops", true, true, "int"),
+    ("tos", true, true, "int"),
+    ("connect_timeout", true, true, "int"),
+    ("handshake_ivl", true, true, "int"),
+    ("heartbeat_ivl", true, true, "int"),
+    ("heartbeat_ttl", true, true, "int"),
+    ("heartbeat_timeout", true, true, "int"),
+    ("tcp_keepalive", true, true, "int"),
+    ("tcp_keepalive_cnt", true, true, "int"),
+    ("tcp_keepalive_idle", true, true, "int"),
+    ("tcp_keepalive_intvl", true, true, "int"),
+    ("maxmsgsize", true, true, "int"),
+    ("affinity", true, true, "int"),
+    ("ipv6", true, false, "bool"),
+    ("immediate", true, false, "bool"),
+    ("conflate", true, false, "bool"),
+    ("probe_router", true, false, "bool"),
+    ("router_mandatory", true, false, "bool"),
+    ("router_handover", true, false, "bool"),
+    ("req_relaxed", true, false, "bool"),
+    ("req_correlate", true, false, "bool"),
+    ("xpub_verbose", true, false, "bool"),
+    ("plain_server", true, false, "bool"),
+    ("curve_server", true, false, "bool"),
+    ("gssapi_server", true, false, "bool"),
+    ("gssapi_plaintext", true, false, "bool"),
+    ("identity", true, true, "string"),
+    ("subscribe", true, false, "string"),
+    ("unsubscribe", true, false, "string"),
+    ("curve_publickey", true, true, "string"),
+    ("curve_secretkey", true, true, "string"),
+    ("curve_serverkey", true, true, "string"),
+    ("plain_username", true, true, "string"),
+    ("plain_password", true, true, "string"),
+    ("socks_proxy", true, true, "string"),
+    ("zap_domain", true, true, "string"),
+    ("xpub_welcome_msg", true, false, "string"),
+    ("gssapi_principal", true, true, "string"),
+    ("gssapi_service_principal", true, true, "string"),
+];
+
+/// Every libzmq socket-option name this package's `set`/`get` accept, each with
+/// `settable`/`gettable` flags and the JSON `kind` to pass or expect — the
+/// introspection table behind `set_one_opt`/`get_one_opt` (companion of
+/// `socket_types`/`encoding_names`). Lets a caller validate or enumerate the
+/// option surface without a socket. Returns `{options}` — an array of
+/// `{name, settable, gettable, kind}`. Pure.
+fn op_socket_option_names(_opts: Value) -> Result<Value> {
+    let options: Vec<Value> = SOCKET_OPTIONS
+        .iter()
+        .map(|(name, settable, gettable, kind)| {
+            json!({"name": name, "settable": settable, "gettable": gettable, "kind": kind})
+        })
+        .collect();
+    Ok(json!({ "options": options }))
+}
+
+/// Whether a socket-option name is known to this package, and if so whether it
+/// is settable (via `set`), gettable (via `get`), and its JSON value `kind` —
+/// the single-name lookup over the `socket_option_names` table. Lets a caller
+/// guard a `set`/`get` before issuing it. opts: `opt` (or `name`). Returns
+/// `{opt, known, settable, gettable, kind}` (`settable`/`gettable` false and
+/// `kind` null when unknown). Never errors on an unknown name. Pure.
+fn op_valid_socket_option(opts: Value) -> Result<Value> {
+    let name = opts
+        .get("opt")
+        .or_else(|| opts.get("name"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing opt"))?;
+    match SOCKET_OPTIONS.iter().find(|(n, ..)| *n == name) {
+        Some((_, settable, gettable, kind)) => Ok(json!({
+            "opt": name, "known": true,
+            "settable": settable, "gettable": gettable, "kind": kind,
+        })),
+        None => Ok(json!({
+            "opt": name, "known": false,
+            "settable": false, "gettable": false, "kind": Value::Null,
+        })),
+    }
+}
+
 /// The `ZMQ_EVENT_*` flag for a monitor event `name` — the inverse of
 /// `parse_monitor_event`'s id→name map, and the same lookup `monitor` uses to
 /// build an event mask. Accepts `all` (every event). opts: `name`. Returns
@@ -1646,6 +1756,83 @@ fn op_socket_pair(opts: Value) -> Result<Value> {
     Ok(json!({"a": ah, "b": bh, "endpoint": endpoint}))
 }
 
+/// Non-blocking drain: pull every whole multipart message already queued on
+/// `handle` and stop the instant the socket would block (`ZMQ_DONTWAIT` →
+/// `EAGAIN`), never waiting for new traffic. Unlike `recv`/`recv_multipart`
+/// (one message, then block/timeout) this flushes a backlog in one call — e.g.
+/// clearing a slow-joiner SUB queue or a PULL pipeline before shutdown. Each
+/// message is returned as its full frame list, so multipart structure is
+/// preserved. opts: `handle`, optional `encoding`, optional `max` (stop after
+/// this many messages, default unbounded). Returns `{messages, count}` where
+/// `messages` is an array of frame-string arrays (empty when nothing queued).
+fn op_drain(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let max = opts.get("max").and_then(Value::as_u64);
+    with_socket(handle, |s| {
+        let mut messages: Vec<Value> = Vec::new();
+        loop {
+            if let Some(m) = max {
+                if messages.len() as u64 >= m {
+                    break;
+                }
+            }
+            // First frame: DONTWAIT so an empty queue ends the drain instead of
+            // blocking. EAGAIN here is the normal "nothing more" exit.
+            let first = match s.recv_bytes(zmq::DONTWAIT) {
+                Ok(b) => b,
+                Err(zmq::Error::EAGAIN) => break,
+                Err(e) => return Err(anyhow!(e)),
+            };
+            // Remaining frames of THIS message must already be buffered (ZMQ
+            // delivers a multipart message atomically), so a plain recv is safe.
+            let mut frames = vec![Value::String(bytes_to_payload(&opts, &first)?)];
+            while s.get_rcvmore()? {
+                let b = s.recv_bytes(0)?;
+                frames.push(Value::String(bytes_to_payload(&opts, &b)?));
+            }
+            messages.push(Value::Array(frames));
+        }
+        let count = messages.len();
+        Ok(json!({"messages": messages, "count": count}))
+    })
+}
+
+/// Send `data` on a kept `handle` then receive the reply — one FFI round-trip
+/// for the request-reply turn on a socket the caller holds (REQ, DEALER, or a
+/// PAIR), where `request` instead spins up an ephemeral REQ socket per call.
+/// Keeping the handle preserves connection state, identity, and CURVE security
+/// across many turns. opts: `handle`, `data`, optional `timeout_ms` (applied to
+/// the recv), `encoding` (both directions). Returns `{reply, bytes}`, or
+/// `{timeout:true}` if the reply does not arrive in `timeout_ms`.
+fn op_sendrecv(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let bytes = payload_to_bytes(&opts, req_str(&opts, "data")?)?;
+    let timeout_ms = opts.get("timeout_ms").and_then(Value::as_i64);
+    or_timeout(with_socket(handle, |s| {
+        s.send(&bytes, 0)?;
+        if let Some(t) = timeout_ms {
+            s.set_rcvtimeo(t as i32)?;
+        }
+        let reply = s.recv_bytes(0)?;
+        Ok(json!({
+            "reply": bytes_to_payload(&opts, &reply)?,
+            "bytes": reply.len(),
+        }))
+    }))
+}
+
+/// How many sockets this cdylib currently holds open in its registry, with
+/// their handles. Every `socket`/`socket_pair`/`bind`-via-`socket` call adds
+/// one; `close` removes it; `proxy` consumes its handles. A non-zero count at
+/// shutdown means leaked handles. No libzmq call — reads the local registry.
+/// Returns `{count, handles}` (handles sorted ascending). Pure (local state).
+fn op_socket_count(_opts: Value) -> Result<Value> {
+    let map = sockets().lock();
+    let mut handles: Vec<u64> = map.keys().copied().collect();
+    handles.sort_unstable();
+    Ok(json!({"count": handles.len(), "handles": handles}))
+}
+
 // ── ffi boundary ─────────────────────────────────────────────────────────────
 
 /// JSON-string-in / JSON-string-out wrapper. Parses args (malformed →
@@ -1762,6 +1949,11 @@ export!(zmq__capabilities => op_capabilities);
 export!(zmq__events => op_events);
 export!(zmq__recv_more => op_recv_more);
 export!(zmq__socket_pair => op_socket_pair);
+export!(zmq__drain => op_drain);
+export!(zmq__sendrecv => op_sendrecv);
+export!(zmq__socket_count => op_socket_count);
+export!(zmq__socket_option_names => op_socket_option_names);
+export!(zmq__valid_socket_option => op_valid_socket_option);
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -3070,5 +3262,187 @@ mod tests {
         assert_eq!(ga["data"], "to-a", "b → a");
         call(zmq__close, &format!(r#"{{"handle":{a}}}"#));
         call(zmq__close, &format!(r#"{{"handle":{b}}}"#));
+    }
+
+    /// `drain` must pull every queued multipart message non-blockingly and stop
+    /// at the empty queue (not block) — returning each message as its full frame
+    /// list. Pins the `DONTWAIT`→`EAGAIN` loop exit and multipart preservation.
+    #[test]
+    fn drain_flushes_the_whole_backlog_without_blocking() {
+        let ep = "inproc://stryke-zmq-test-drain";
+        let pull = call(zmq__socket, &format!(r#"{{"type":"pull","bind":"{ep}"}}"#));
+        let push = call(
+            zmq__socket,
+            &format!(r#"{{"type":"push","connect":"{ep}"}}"#),
+        );
+        let ph = pull["handle"].as_u64().unwrap();
+        let sh = push["handle"].as_u64().unwrap();
+        // Two single-frame messages plus one two-frame message.
+        call(zmq__send, &format!(r#"{{"handle":{sh},"data":"a"}}"#));
+        call(zmq__send, &format!(r#"{{"handle":{sh},"data":"b"}}"#));
+        call(
+            zmq__send_multipart,
+            &format!(r#"{{"handle":{sh},"parts":["c","d"]}}"#),
+        );
+        // Give inproc delivery a beat, then poll to ensure readiness.
+        call(zmq__poll, &format!(r#"{{"handle":{ph},"timeout_ms":500}}"#));
+        let drained = call(zmq__drain, &format!(r#"{{"handle":{ph}}}"#));
+        assert_eq!(drained["count"], 3, "all three messages drained");
+        assert_eq!(
+            drained["messages"],
+            json!([["a"], ["b"], ["c", "d"]]),
+            "frame structure preserved per message"
+        );
+        // A second drain on the now-empty queue returns nothing, no block.
+        let again = call(zmq__drain, &format!(r#"{{"handle":{ph}}}"#));
+        assert_eq!(again["count"], 0, "empty queue drains to nothing");
+        call(zmq__close, &format!(r#"{{"handle":{ph}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{sh}}}"#));
+    }
+
+    /// `sendrecv` does the send→recv turn on a kept handle in one call. The
+    /// registry holds one global lock for a socket op, so a blocking recv inside
+    /// sendrecv must not need concurrent access to another socket — mirror real
+    /// single-threaded use: `b` pre-queues "pong", then `a`'s sendrecv sends
+    /// "ping" and recvs the already-waiting reply. Pins the single-FFI-hop
+    /// round-trip on a held handle (vs the ephemeral-socket `request`).
+    #[test]
+    fn sendrecv_does_one_round_trip_on_a_kept_handle() {
+        let ep = "inproc://stryke-zmq-test-sendrecv";
+        let a = call(zmq__socket, &format!(r#"{{"type":"pair","bind":"{ep}"}}"#));
+        let b = call(
+            zmq__socket,
+            &format!(r#"{{"type":"pair","connect":"{ep}"}}"#),
+        );
+        let ah = a["handle"].as_u64().unwrap();
+        let bh = b["handle"].as_u64().unwrap();
+        // Reply is queued first so a's sendrecv recv returns it without blocking.
+        call(zmq__send, &format!(r#"{{"handle":{bh},"data":"pong"}}"#));
+        // Let inproc deliver, then sendrecv on `a`: sends "ping", recvs "pong".
+        call(zmq__poll, &format!(r#"{{"handle":{ah},"timeout_ms":500}}"#));
+        let rt = call(
+            zmq__sendrecv,
+            &format!(r#"{{"handle":{ah},"data":"ping","timeout_ms":2000}}"#),
+        );
+        assert_eq!(rt["reply"], "pong", "sendrecv returned the queued reply");
+        // And `b` must have received the request sendrecv sent.
+        let got = call(
+            zmq__recv,
+            &format!(r#"{{"handle":{bh},"timeout_ms":2000}}"#),
+        );
+        assert_eq!(got["data"], "ping", "b received the sendrecv request");
+        call(zmq__close, &format!(r#"{{"handle":{ah}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{bh}}}"#));
+    }
+
+    /// `sendrecv` with no reply and a short `timeout_ms` must surface
+    /// `{timeout:true}`, not block and not error.
+    #[test]
+    fn sendrecv_times_out_when_no_reply() {
+        let ep = "inproc://stryke-zmq-test-sendrecv-timeout";
+        let a = call(zmq__socket, &format!(r#"{{"type":"pair","bind":"{ep}"}}"#));
+        let b = call(
+            zmq__socket,
+            &format!(r#"{{"type":"pair","connect":"{ep}"}}"#),
+        );
+        let ah = a["handle"].as_u64().unwrap();
+        let bh = b["handle"].as_u64().unwrap();
+        let rt = call(
+            zmq__sendrecv,
+            &format!(r#"{{"handle":{ah},"data":"hello","timeout_ms":100}}"#),
+        );
+        assert_eq!(rt["timeout"], true, "no reply → timeout flag");
+        assert!(rt.get("error").is_none(), "timeout is not an error");
+        call(zmq__close, &format!(r#"{{"handle":{ah}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{bh}}}"#));
+    }
+
+    /// `socket_count` reflects the live registry: a freshly-opened handle appears
+    /// in `handles` and `count` matches the list length; after close the handle is
+    /// gone. Asserts membership, not an absolute count — other tests share the
+    /// process-wide registry and run concurrently. Pins the introspection.
+    #[test]
+    fn socket_count_tracks_open_handles() {
+        let s = call(
+            zmq__socket,
+            r#"{"type":"pull","bind":"inproc://stryke-zmq-test-count"}"#,
+        );
+        let h = s["handle"].as_u64().unwrap();
+        let after = call(zmq__socket_count, "{}");
+        let handles = after["handles"].as_array().unwrap();
+        assert_eq!(
+            after["count"].as_u64().unwrap(),
+            handles.len() as u64,
+            "count matches the handle-list length"
+        );
+        assert!(
+            handles.iter().any(|v| v.as_u64() == Some(h)),
+            "the new handle appears in the list"
+        );
+        call(zmq__close, &format!(r#"{{"handle":{h}}}"#));
+        let done = call(zmq__socket_count, "{}");
+        assert!(
+            !done["handles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_u64() == Some(h)),
+            "the handle is gone after close"
+        );
+    }
+
+    /// `socket_option_names` + `valid_socket_option` agree, and the table covers
+    /// the asymmetry fixes (tcp_keepalive_cnt/idle/intvl + gssapi principals are
+    /// now gettable). Catches drift between the table and the set/get arms.
+    #[test]
+    fn socket_option_introspection_is_consistent() {
+        let list = call(zmq__socket_option_names, "{}");
+        let options = list["options"].as_array().expect("options array");
+        assert!(options.len() > 40, "the full option table is exposed");
+        // Every listed name must validate to known with matching flags.
+        for opt in options {
+            let name = opt["name"].as_str().unwrap();
+            let v = call(zmq__valid_socket_option, &format!(r#"{{"opt":"{name}"}}"#));
+            assert_eq!(v["known"], true, "{name} must be known");
+            assert_eq!(v["settable"], opt["settable"], "{name} settable agrees");
+            assert_eq!(v["gettable"], opt["gettable"], "{name} gettable agrees");
+        }
+        // The asymmetry fixes are now gettable.
+        for g in [
+            "tcp_keepalive_cnt",
+            "tcp_keepalive_idle",
+            "tcp_keepalive_intvl",
+            "gssapi_principal",
+            "gssapi_service_principal",
+        ] {
+            let v = call(zmq__valid_socket_option, &format!(r#"{{"opt":"{g}"}}"#));
+            assert_eq!(v["gettable"], true, "{g} is now gettable");
+        }
+        // An unknown name validates cleanly to not-known, never errors.
+        let unknown = call(zmq__valid_socket_option, r#"{"opt":"no_such_option"}"#);
+        assert_eq!(unknown["known"], false);
+        assert!(unknown.get("error").is_none(), "unknown is not an error");
+    }
+
+    /// The newly-gettable tcp_keepalive sub-options round-trip through `set` then
+    /// `get` on a live socket — proving the new `get_one_opt` arms actually read.
+    #[test]
+    fn tcp_keepalive_suboptions_round_trip() {
+        let s = call(
+            zmq__socket,
+            r#"{"type":"req","tcp_keepalive_cnt":7,"tcp_keepalive_idle":11}"#,
+        );
+        let h = s["handle"].as_u64().unwrap();
+        let cnt = call(
+            zmq__get,
+            &format!(r#"{{"handle":{h},"opt":"tcp_keepalive_cnt"}}"#),
+        );
+        assert_eq!(cnt["value"], 7, "tcp_keepalive_cnt reads back");
+        let idle = call(
+            zmq__get,
+            &format!(r#"{{"handle":{h},"opt":"tcp_keepalive_idle"}}"#),
+        );
+        assert_eq!(idle["value"], 11, "tcp_keepalive_idle reads back");
+        call(zmq__close, &format!(r#"{{"handle":{h}}}"#));
     }
 }

@@ -146,6 +146,7 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::io_threads($value?)` | int | get (no arg) or set the shared context's `ZMQ_IO_THREADS` pool size (default 1, process-wide) |
 | `Zmq::socket($type, %opts)` | handle (int) | type: req/rep/pub/sub/push/pull/dealer/router/pair/xpub/xsub/stream. opts: bind, connect, subscribe + any settable option (see `set`) |
 | `Zmq::socket_pair(%opts)` | hashref | `{ a, b, endpoint }` — a connected inproc PAIR in one call (a = bound, b = connected); opts: `endpoint` (default a unique inproc name) |
+| `Zmq::socket_count()` | hashref | `{ count, handles }` — how many sockets the cdylib holds open + their handles (leak detection); reads the local registry, no libzmq call |
 | `Zmq::close($handle)` | hashref | closes + removes the socket |
 | `Zmq::bind($handle, $endpoint)` | string | binds; returns the concrete endpoint (resolves `tcp://*:*`) |
 | `Zmq::connect($handle, $endpoint)` | hashref | dynamic connect |
@@ -156,10 +157,12 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::recv($handle, %opts)` | string \| undef | opts: timeout_ms, encoding. undef on timeout |
 | `Zmq::recv_multipart($handle, %opts)` | list | opts: timeout_ms, encoding. empty list on timeout |
 | `Zmq::recv_more($handle, %opts)` | list | drain the trailing frames of the message a prior `recv` started (while `RCVMORE` is set); opts: timeout_ms, encoding |
+| `Zmq::drain($handle, %opts)` | list | non-blocking drain — every whole multipart message already queued (each an arrayref of frames), stopping at the empty queue (`ZMQ_DONTWAIT`); opts: encoding, `max`; empty list when nothing queued |
+| `Zmq::sendrecv($handle, $data, %opts)` | string \| undef | send then recv one turn on a kept handle (REQ/DEALER/PAIR) — one round-trip without an ephemeral socket like `request`; opts: timeout_ms, encoding; undef on reply timeout |
 | `Zmq::subscribe($handle, $topic)` | hashref | SUB topic filter (`""` = all) |
 | `Zmq::unsubscribe($handle, $topic)` | hashref | remove a subscription |
 | `Zmq::set($handle, $opt, $value)` | hashref | full socket-option table: timeouts/buffers/hwm, tcp_keepalive\*, heartbeat\*, ipv6, immediate, conflate, router/req flags, CURVE keys, plain auth, identity… |
-| `Zmq::get($handle, $opt)` | scalar | read back any option (type, last_endpoint, mechanism, fd, CURVE keys as z85, …) |
+| `Zmq::get($handle, $opt)` | scalar | read back any option (type, last_endpoint, mechanism, fd, CURVE keys as z85, tcp_keepalive_cnt/idle/intvl, gssapi_principal/service_principal, …) |
 | `Zmq::poll($handle, %opts)` | hashref | `{ readable, writable }`; opts: timeout_ms |
 | `Zmq::poll_many($handles, %opts)` | list | one `zmq_poll` over many handles → `{ handle, readable, writable, error }` |
 | `Zmq::events($handle)` | hashref | `{ readable, writable, events }` — non-blocking readiness via `ZMQ_EVENTS` (zero-wait peek, not a `zmq_poll` call) |
@@ -195,6 +198,8 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::socket_event_names()` | list | every monitor event → `{ name, flag, is_error }` (the table behind `parse_monitor_event`) |
 | `Zmq::monitor_event_flag($name)` | int | the `ZMQ_EVENT_*` flag for an event name (inverse of `parse_monitor_event`; accepts `all`) |
 | `Zmq::subscription_diff(\@current, \@desired)` | hashref | `{ add, remove, unchanged }` — the subscribe/unsubscribe set difference to reconcile a SUB filter |
+| `Zmq::socket_option_names()` | list | every option `set`/`get` accept → `{ name, settable, gettable, kind }` (the table behind `set`/`get`) |
+| `Zmq::valid_socket_option($opt)` | hashref | `{ opt, known, settable, gettable, kind }` — single-name lookup over the option table to guard a `set`/`get`; never errors on an unknown name |
 
 The pure helpers (validation, endpoint, topic, and table utilities) create no
 socket. Endpoints follow ZeroMQ's transport syntax: `tcp://host:port`,

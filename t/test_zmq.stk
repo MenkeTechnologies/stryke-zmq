@@ -333,4 +333,58 @@ assert_eq Zmq::recv($sp->{a}, timeout_ms => 2000), "to-a", "socket_pair: b → a
 Zmq::close($sp->{a})
 Zmq::close($sp->{b})
 
+# ── batch-3 surface ──────────────────────────────────────────────────
+
+# drain: flush a whole backlog non-blockingly, preserving multipart structure.
+val $dr_ep = "inproc://test-drain-$$"
+val $dr_pull = Zmq::socket("pull", bind => $dr_ep)
+val $dr_push = Zmq::socket("push", connect => $dr_ep)
+Zmq::send($dr_push, "a")
+Zmq::send($dr_push, "b")
+Zmq::send_multipart($dr_push, ["c", "d"])
+Zmq::poll($dr_pull, timeout_ms => 500)
+val @drained = Zmq::drain($dr_pull)
+assert_eq scalar(@drained), 3, "drain: pulls all three queued messages"
+assert_eq join(",", @{ $drained[0] }), "a", "drain: first message single-frame"
+assert_eq join(",", @{ $drained[2] }), "c,d", "drain: third keeps both frames"
+assert_eq scalar(Zmq::drain($dr_pull)), 0, "drain: empty queue drains to nothing (no block)"
+Zmq::close($dr_pull)
+Zmq::close($dr_push)
+
+# sendrecv: send + recv one turn on a kept handle (reply pre-queued so the
+# blocking recv returns without needing concurrent access to the peer).
+val $srp = Zmq::socket_pair()
+Zmq::send($srp->{b}, "pong")
+Zmq::poll($srp->{a}, timeout_ms => 500)
+assert_eq Zmq::sendrecv($srp->{a}, "ping", timeout_ms => 2000), "pong", "sendrecv: returns the reply"
+assert_eq Zmq::recv($srp->{b}, timeout_ms => 2000), "ping", "sendrecv: peer received the request"
+assert_eq Zmq::sendrecv($srp->{a}, "x", timeout_ms => 100), undef, "sendrecv: undef on reply timeout"
+Zmq::recv($srp->{b}, timeout_ms => 500)
+Zmq::close($srp->{a})
+Zmq::close($srp->{b})
+
+# socket_count: the live registry tracks open handles.
+val $sc_h = Zmq::socket("pull", bind => "inproc://test-count-$$")
+val $sc = Zmq::socket_count()
+assert_eq $sc->{count}, scalar(@{ $sc->{handles} }), "socket_count: count matches handle-list length"
+assert_ok((grep { $_ == $sc_h } @{ $sc->{handles} }), "socket_count: new handle is listed")
+Zmq::close($sc_h)
+assert_ok(!(grep { $_ == $sc_h } @{ Zmq::socket_count()->{handles} }), "socket_count: handle gone after close")
+
+# socket_option_names / valid_socket_option: the option introspection table.
+val @optnames = Zmq::socket_option_names()
+assert_ok scalar(@optnames) > 40, "socket_option_names: full option table exposed"
+val ($linger_opt) = grep { $_->{name} eq "linger" } @optnames
+assert_eq $linger_opt->{settable}, 1, "socket_option_names: linger is settable"
+assert_eq $linger_opt->{gettable}, 1, "socket_option_names: linger is gettable"
+val $vso = Zmq::valid_socket_option("tcp_keepalive_idle")
+assert_eq $vso->{known}, 1, "valid_socket_option: tcp_keepalive_idle is known"
+assert_eq $vso->{gettable}, 1, "valid_socket_option: tcp_keepalive_idle now gettable"
+assert_eq Zmq::valid_socket_option("no_such_opt")->{known}, 0, "valid_socket_option: unknown name → not known"
+
+# the gssapi/tcp_keepalive asymmetry fix: settable options are now readable too.
+val $ka_h = Zmq::socket("req", tcp_keepalive_cnt => 5)
+assert_eq Zmq::get($ka_h, "tcp_keepalive_cnt"), 5, "get: tcp_keepalive_cnt reads back (was set-only)"
+Zmq::close($ka_h)
+
 test_run

@@ -102,6 +102,15 @@ fn Zmq::socket_pair (%opts) {
     Zmq::_decode("socket_pair", zmq__socket_pair(to_json({ endpoint => $opts{endpoint} })))
 }
 
+## How many sockets this cdylib currently holds open, with their handles. Every
+## socket()/socket_pair() adds one; close() removes it; proxy() consumes its
+## handles. A non-zero count at shutdown means leaked handles. No libzmq call —
+## reads the local registry. Returns a hashref { count, handles } (handles
+## sorted ascending).
+fn Zmq::socket_count {
+    Zmq::_decode("socket_count", zmq__socket_count("{}"))
+}
+
 # ── dynamic endpoint management ─────────────────────────────────────
 
 ## Bind $handle to $endpoint. Returns the concrete endpoint — for a wildcard
@@ -173,6 +182,32 @@ fn Zmq::recv_more ($handle, %opts) {
         zmq__recv_more(to_json({ handle => $handle, timeout_ms => $opts{timeout_ms}, encoding => $opts{encoding} })))
     return () if $o->{timeout}
     @{ $o->{parts} }
+}
+
+## Non-blocking drain — pull every whole multipart message already queued on
+## $handle and stop the instant the socket would block (ZMQ_DONTWAIT), never
+## waiting for new traffic. Unlike recv/recv_multipart (one message, then
+## block/timeout) this flushes a backlog in one call — e.g. clearing a slow-joiner
+## SUB queue or a PULL pipeline before shutdown. Each message keeps its full frame
+## list. opts: encoding; max => stop after this many messages (default unbounded).
+## Returns a list of messages, each an arrayref of frame strings (empty list when
+## nothing was queued).
+fn Zmq::drain ($handle, %opts) {
+    val $o = Zmq::_decode("drain",
+        zmq__drain(to_json({ handle => $handle, encoding => $opts{encoding}, max => $opts{max} })))
+    @{ $o->{messages} }
+}
+
+## Send $data on a kept $handle then receive the reply — one round-trip on a
+## socket the caller holds (REQ/DEALER/PAIR), preserving connection state and
+## security across turns, where request() instead spins up an ephemeral REQ
+## socket per call. opts: timeout_ms (applied to the recv), encoding (both
+## directions). Returns the reply string, or undef on timeout.
+fn Zmq::sendrecv ($handle, $data, %opts) {
+    val $r = { handle => $handle, data => $data, timeout_ms => $opts{timeout_ms}, encoding => $opts{encoding} }
+    val $o = Zmq::_decode("sendrecv", zmq__sendrecv(to_json($r)))
+    return undef if $o->{timeout}
+    $o->{reply}
 }
 
 # ── pub/sub topic filters ───────────────────────────────────────────
@@ -502,6 +537,24 @@ fn Zmq::socket_event_names {
 ## Accepts "all" for every event. Returns the integer flag.
 fn Zmq::monitor_event_flag ($name) {
     Zmq::_decode("monitor_event_flag", zmq__monitor_event_flag(to_json({ name => $name })))->{flag}
+}
+
+## Every libzmq socket-option name set()/get() accept, each with settable/gettable
+## flags and the JSON kind to pass or expect — the introspection table behind
+## set/get (companion of socket_types/encoding_names). Lets you enumerate or
+## validate the option surface without a socket. Returns a list of
+## { name, settable, gettable, kind }.
+fn Zmq::socket_option_names {
+    @{ Zmq::_decode("socket_option_names", zmq__socket_option_names("{}"))->{options} }
+}
+
+## Whether a socket-option $opt is known to this package, and if so whether it is
+## settable (via set), gettable (via get), and its JSON value kind — the
+## single-name lookup over socket_option_names. Lets you guard a set/get before
+## issuing it. Never errors on an unknown name. Returns a hashref
+## { opt, known, settable, gettable, kind } (kind undef when unknown).
+fn Zmq::valid_socket_option ($opt) {
+    Zmq::_decode("valid_socket_option", zmq__valid_socket_option(to_json({ opt => $opt })))
 }
 
 ## Plan the subscribe/unsubscribe calls to move a SUB socket from \@current to

@@ -66,6 +66,11 @@ exports = [
     "zmq__events",
     "zmq__recv_more",
     "zmq__socket_pair",
+    "zmq__drain",
+    "zmq__sendrecv",
+    "zmq__socket_count",
+    "zmq__socket_option_names",
+    "zmq__valid_socket_option",
 ]
 
 [scripts]
