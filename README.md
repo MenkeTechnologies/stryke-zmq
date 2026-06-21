@@ -141,7 +141,10 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::version()` | string | package (crate) version |
 | `Zmq::lib_version()` | hashref | vendored libzmq `{ major, minor, patch, version }` |
 | `Zmq::has($capability)` | bool \| undef | probe `curve`/`gssapi`/`ipc`/`pgm`/`tipc`/`norm`/`draft` |
+| `Zmq::capabilities()` | hashref | probe every capability at once → `{ ipc, pgm, tipc, norm, curve, gssapi, draft }` (bool \| undef) |
+| `Zmq::io_threads($value?)` | int | get (no arg) or set the shared context's `ZMQ_IO_THREADS` pool size (default 1, process-wide) |
 | `Zmq::socket($type, %opts)` | handle (int) | type: req/rep/pub/sub/push/pull/dealer/router/pair/xpub/xsub/stream. opts: bind, connect, subscribe + any settable option (see `set`) |
+| `Zmq::socket_pair(%opts)` | hashref | `{ a, b, endpoint }` — a connected inproc PAIR in one call (a = bound, b = connected); opts: `endpoint` (default a unique inproc name) |
 | `Zmq::close($handle)` | hashref | closes + removes the socket |
 | `Zmq::bind($handle, $endpoint)` | string | binds; returns the concrete endpoint (resolves `tcp://*:*`) |
 | `Zmq::connect($handle, $endpoint)` | hashref | dynamic connect |
@@ -151,12 +154,14 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::send_multipart($handle, $parts, %opts)` | hashref | `$parts` arrayref; opts: `encoding` |
 | `Zmq::recv($handle, %opts)` | string \| undef | opts: timeout_ms, encoding. undef on timeout |
 | `Zmq::recv_multipart($handle, %opts)` | list | opts: timeout_ms, encoding. empty list on timeout |
+| `Zmq::recv_more($handle, %opts)` | list | drain the trailing frames of the message a prior `recv` started (while `RCVMORE` is set); opts: timeout_ms, encoding |
 | `Zmq::subscribe($handle, $topic)` | hashref | SUB topic filter (`""` = all) |
 | `Zmq::unsubscribe($handle, $topic)` | hashref | remove a subscription |
 | `Zmq::set($handle, $opt, $value)` | hashref | full socket-option table: timeouts/buffers/hwm, tcp_keepalive\*, heartbeat\*, ipv6, immediate, conflate, router/req flags, CURVE keys, plain auth, identity… |
 | `Zmq::get($handle, $opt)` | scalar | read back any option (type, last_endpoint, mechanism, fd, CURVE keys as z85, …) |
 | `Zmq::poll($handle, %opts)` | hashref | `{ readable, writable }`; opts: timeout_ms |
 | `Zmq::poll_many($handles, %opts)` | list | one `zmq_poll` over many handles → `{ handle, readable, writable, error }` |
+| `Zmq::events($handle)` | hashref | `{ readable, writable, events }` — non-blocking readiness via `ZMQ_EVENTS` (zero-wait peek, not a `zmq_poll` call) |
 | `Zmq::monitor($handle, $endpoint, %opts)` | hashref | publish lifecycle events to an inproc endpoint; opts: `events` |
 | `Zmq::monitor_recv($handle, %opts)` | hashref \| undef | decode one event `{ event, value, endpoint }` from a monitor PAIR |
 | `Zmq::proxy($frontend, $backend, %opts)` | hashref | backgrounded `zmq_proxy` device; opts: `capture`, `control` (steerable) |
@@ -182,9 +187,15 @@ process closes everything via libzmq's `zmq_close` on drop.
 | `Zmq::socket_peers($type)` | list | socket types `$type` can validly connect to (ZMQ messaging-pattern compatibility) |
 | `Zmq::socket_types_compatible($a, $b)` | 1 \| "" | whether types `$a` and `$b` can be connected as peers (REQ↔REP, PUB↔SUB, PUSH↔PULL, …) |
 | `Zmq::socket_caps($type)` | `{ type, pattern, can_send, can_recv }` | messaging pattern + send/recv directionality (PUB send-only, SUB recv-only, …) |
+| `Zmq::socket_caps_all()` | list | the `socket_caps` table for every type in one call |
 | `Zmq::socket_types()` | list | every canonical socket-type name |
+| `Zmq::socket_type_id($type)` | int | the libzmq `ZMQ_*` integer for a type (PAIR=0…STREAM=11), for raw interop |
+| `Zmq::encoding_names()` | list | every payload encoding accepted → `{ name, aliases, binary_safe }` |
+| `Zmq::socket_event_names()` | list | every monitor event → `{ name, flag, is_error }` (the table behind `parse_monitor_event`) |
+| `Zmq::monitor_event_flag($name)` | int | the `ZMQ_EVENT_*` flag for an event name (inverse of `parse_monitor_event`; accepts `all`) |
+| `Zmq::subscription_diff(\@current, \@desired)` | hashref | `{ add, remove, unchanged }` — the subscribe/unsubscribe set difference to reconcile a SUB filter |
 
-The last four are pure helpers — string/validation utilities that create no
+The pure helpers (validation, endpoint, topic, and table utilities) create no
 socket. Endpoints follow ZeroMQ's transport syntax: `tcp://host:port`,
 `ipc:///tmp/sock`, `inproc://name`, `pgm://`, `epgm://`.
 
@@ -250,11 +261,15 @@ stryke-zmq/
 ## [0x09] Roadmap
 
 Shipped: binary-safe payloads (`encoding => hex|base64`), multi-socket
-`poll_many`, the full socket-option table (`set`/`get`), dynamic
-bind/connect/unbind/disconnect, socket-event monitoring, a backgrounded
-`proxy` device, and the z85 codec + `curve_keypair` (CURVE key auth on
+`poll_many` plus zero-wait `events` readiness, the full socket-option table
+(`set`/`get`), dynamic bind/connect/unbind/disconnect, socket-event monitoring
+(`monitor`/`monitor_recv`/`socket_event_names`/`monitor_event_flag`), a
+backgrounded `proxy` device, the z85 codec + `curve_keypair` (CURVE key auth on
 sockets via `curve_*` options; keypair generation needs a libsodium-enabled
-libzmq — probe `Zmq::has("curve")`).
+libzmq — probe `Zmq::has("curve")`), trailing-frame `recv_more`, one-call
+`socket_pair`, context `io_threads` tuning, batch `capabilities`, and the
+topology helpers (`socket_type_id`, `socket_caps_all`, `subscription_diff`,
+`encoding_names`).
 
 Open:
 

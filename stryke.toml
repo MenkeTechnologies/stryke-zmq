@@ -55,6 +55,17 @@ exports = [
     "zmq__socket_types_compatible",
     "zmq__socket_caps",
     "zmq__socket_types",
+    "zmq__socket_type_id",
+    "zmq__socket_caps_all",
+    "zmq__encoding_names",
+    "zmq__socket_event_names",
+    "zmq__monitor_event_flag",
+    "zmq__subscription_diff",
+    "zmq__io_threads",
+    "zmq__capabilities",
+    "zmq__events",
+    "zmq__recv_more",
+    "zmq__socket_pair",
 ]
 
 [scripts]

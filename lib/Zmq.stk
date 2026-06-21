@@ -54,6 +54,21 @@ fn Zmq::has ($capability) {
     $o->{has}
 }
 
+## Probe every optional libzmq capability at once — the batch form of has().
+## Returns a hashref mapping each name (ipc/pgm/tipc/norm/curve/gssapi/draft) to
+## 1/0, or undef when the running libzmq is too old to report.
+fn Zmq::capabilities {
+    Zmq::_decode("capabilities", zmq__capabilities("{}"))->{capabilities}
+}
+
+## Get or set the shared context's libzmq I/O-thread-pool size (ZMQ_IO_THREADS).
+## With $value it sets the pool; with no arg it reads the current size (default
+## 1). Process-wide (one shared context). Returns the integer pool size.
+fn Zmq::io_threads ($value = undef) {
+    val $r = defined($value) ? { value => $value } : {}
+    Zmq::_decode("io_threads", zmq__io_threads(to_json($r)))->{io_threads}
+}
+
 # ── socket lifecycle ────────────────────────────────────────────────
 
 ## Create a socket of $type ("req","rep","pub","sub","push","pull",
@@ -77,6 +92,14 @@ fn Zmq::socket ($type, %opts) {
 ## Close a socket by handle.
 fn Zmq::close ($handle) {
     Zmq::_decode("close", zmq__close(to_json({ handle => $handle })))
+}
+
+## Create a connected PAIR over a fresh inproc:// endpoint in one call — the
+## natural in-process channel between two stryke threads. opts: endpoint (default
+## a unique inproc name). Returns a hashref { a, b, endpoint } — a is the bound
+## end, b the connected end.
+fn Zmq::socket_pair (%opts) {
+    Zmq::_decode("socket_pair", zmq__socket_pair(to_json({ endpoint => $opts{endpoint} })))
 }
 
 # ── dynamic endpoint management ─────────────────────────────────────
@@ -140,6 +163,18 @@ fn Zmq::recv_multipart ($handle, %opts) {
     @{ $o->{parts} }
 }
 
+## Drain the remaining frames of the multipart message currently being read on
+## $handle — every frame after the one the last recv() returned, while RCVMORE is
+## set. Use it to finish a message you started reading with recv(). opts:
+## timeout_ms, encoding. Returns a list of the trailing frame strings (empty when
+## the last frame was already final), or empty list on timeout.
+fn Zmq::recv_more ($handle, %opts) {
+    val $o = Zmq::_decode("recv_more",
+        zmq__recv_more(to_json({ handle => $handle, timeout_ms => $opts{timeout_ms}, encoding => $opts{encoding} })))
+    return () if $o->{timeout}
+    @{ $o->{parts} }
+}
+
 # ── pub/sub topic filters ───────────────────────────────────────────
 
 ## Subscribe a SUB socket to $topic ("" = all messages).
@@ -188,6 +223,14 @@ fn Zmq::poll_many ($handles, %opts) {
     val $o = Zmq::_decode("poll_many",
         zmq__poll_many(to_json({ handles => $handles, timeout_ms => $opts{timeout_ms} })))
     @{ $o->{states} }
+}
+
+## Non-blocking readiness via the ZMQ_EVENTS socket option (get_events), not a
+## zmq_poll call — reads $handle's currently-pending event bitmask with zero
+## wait (poll() blocks up to timeout_ms; this is the instant peek). Returns a
+## hashref { readable, writable, events } where events is the raw bitmask.
+fn Zmq::events ($handle) {
+    Zmq::_decode("events", zmq__events(to_json({ handle => $handle })))
 }
 
 # ── socket event monitoring ─────────────────────────────────────────
@@ -425,4 +468,46 @@ fn Zmq::socket_caps ($type) {
 ## List of every canonical socket-type name this package accepts.
 fn Zmq::socket_types {
     @{ Zmq::_decode("socket_types", zmq__socket_types("{}"))->{types} }
+}
+
+## The libzmq ZMQ_* integer constant for a socket-type name (PAIR=0, PUB=1,
+## SUB=2, REQ=3, REP=4, DEALER=5, ROUTER=6, PULL=7, PUSH=8, XPUB=9, XSUB=10,
+## STREAM=11) — the stable ABI value, for raw interop. Aliases accepted.
+## Returns the integer id.
+fn Zmq::socket_type_id ($type) {
+    Zmq::_decode("socket_type_id", zmq__socket_type_id(to_json({ type => $type })))->{id}
+}
+
+## The socket_caps table for every canonical socket type in one call — the batch
+## form of socket_caps. Returns a list of { type, pattern, can_send, can_recv }.
+fn Zmq::socket_caps_all {
+    @{ Zmq::_decode("socket_caps_all", zmq__socket_caps_all("{}"))->{caps} }
+}
+
+## Every payload encoding name send/recv/codec accept (utf8/text, hex,
+## base64/b64). Returns a list of { name, aliases, binary_safe }.
+fn Zmq::encoding_names {
+    @{ Zmq::_decode("encoding_names", zmq__encoding_names("{}"))->{encodings} }
+}
+
+## Every libzmq socket-monitor event this package decodes, with its ZMQ_EVENT_*
+## flag and failure flag — the table behind parse_monitor_event and monitor.
+## Returns a list of { name, flag, is_error }.
+fn Zmq::socket_event_names {
+    @{ Zmq::_decode("socket_event_names", zmq__socket_event_names("{}"))->{events} }
+}
+
+## The ZMQ_EVENT_* flag for a monitor event $name — inverse of the
+## parse_monitor_event id→name map (and the lookup monitor uses to build a mask).
+## Accepts "all" for every event. Returns the integer flag.
+fn Zmq::monitor_event_flag ($name) {
+    Zmq::_decode("monitor_event_flag", zmq__monitor_event_flag(to_json({ name => $name })))->{flag}
+}
+
+## Plan the subscribe/unsubscribe calls to move a SUB socket from \@current to
+## \@desired subscriptions — the set difference. Returns a hashref
+## { add, remove, unchanged }: add is desired\current, remove is current\desired.
+fn Zmq::subscription_diff ($current, $desired) {
+    Zmq::_decode("subscription_diff",
+        zmq__subscription_diff(to_json({ current => $current, desired => $desired })))
 }

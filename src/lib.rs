@@ -1431,6 +1431,221 @@ fn op_socket_types(_opts: Value) -> Result<Value> {
     ]}))
 }
 
+/// The libzmq `ZMQ_*` integer constant for a canonical socket-type name —
+/// the stable wire/ABI value (PAIR=0, PUB=1, SUB=2, REQ=3, REP=4, DEALER=5,
+/// ROUTER=6, PULL=7, PUSH=8, XPUB=9, XSUB=10, STREAM=11), per `zmq.h`. Lets a
+/// caller build a raw socket option or interop with another binding by id.
+/// The input is canonicalized (aliases accepted). opts: `type`. Returns
+/// `{type, id}`. Pure.
+fn op_socket_type_id(opts: Value) -> Result<Value> {
+    let canonical = socket_type_name(parse_socket_type(req_str(&opts, "type")?)?);
+    // libzmq's ZMQ_* socket-type integers (zmq.h) — stable since 4.x.
+    let id = match canonical {
+        "pair" => 0,
+        "pub" => 1,
+        "sub" => 2,
+        "req" => 3,
+        "rep" => 4,
+        "dealer" => 5,
+        "router" => 6,
+        "pull" => 7,
+        "push" => 8,
+        "xpub" => 9,
+        "xsub" => 10,
+        "stream" => 11,
+        other => return Err(anyhow!("no socket-type id for `{other}`")),
+    };
+    Ok(json!({"type": canonical, "id": id}))
+}
+
+/// The `socket_caps` table for every canonical socket type in one call — the
+/// batch form of `op_socket_caps`. Lets a caller fetch the whole
+/// pattern/directionality matrix without one FFI round-trip per type. No
+/// socket. Returns `{caps}` — an array of `{type, pattern, can_send,
+/// can_recv}`. Pure.
+fn op_socket_caps_all(_opts: Value) -> Result<Value> {
+    let types = [
+        "req", "rep", "pub", "sub", "push", "pull", "dealer", "router", "pair", "xpub", "xsub",
+        "stream",
+    ];
+    let caps: Vec<Value> = types
+        .iter()
+        .map(|t| op_socket_caps(json!({ "type": t })))
+        .collect::<Result<_>>()?;
+    Ok(json!({ "caps": caps }))
+}
+
+/// Every payload `encoding` name this package's send/recv/codec paths accept
+/// (`utf8`/`text`, `hex`, `base64`/`b64`). The companion of `socket_types` for
+/// the framing dimension; lets a caller validate an `encoding` before a send.
+/// Returns `{encodings}` — the canonical names with their aliases. Pure.
+fn op_encoding_names(_opts: Value) -> Result<Value> {
+    Ok(json!({"encodings": [
+        {"name": "utf8", "aliases": ["text"], "binary_safe": false},
+        {"name": "hex", "aliases": [], "binary_safe": true},
+        {"name": "base64", "aliases": ["b64"], "binary_safe": true},
+    ]}))
+}
+
+/// Every libzmq socket-monitor event name this package decodes, with its
+/// `ZMQ_EVENT_*` flag and whether it signals a failure — the table form behind
+/// `parse_monitor_event` and `monitor`. Lets a caller build an event mask or
+/// validate an event name without a socket. Returns `{events}` — an array of
+/// `{name, flag, is_error}`. Pure.
+fn op_socket_event_names(_opts: Value) -> Result<Value> {
+    // Mirrors the EVENTS table in op_parse_monitor_event (zmq.h ZMQ_EVENT_*).
+    const EVENTS: &[(&str, i64, bool)] = &[
+        ("connected", 0x0001, false),
+        ("connect_delayed", 0x0002, false),
+        ("connect_retried", 0x0004, false),
+        ("listening", 0x0008, false),
+        ("bind_failed", 0x0010, true),
+        ("accepted", 0x0020, false),
+        ("accept_failed", 0x0040, true),
+        ("closed", 0x0080, false),
+        ("close_failed", 0x0100, true),
+        ("disconnected", 0x0200, false),
+        ("monitor_stopped", 0x0400, false),
+        ("handshake_failed_no_detail", 0x0800, true),
+        ("handshake_succeeded", 0x1000, false),
+        ("handshake_failed_protocol", 0x2000, true),
+        ("handshake_failed_auth", 0x4000, true),
+    ];
+    let events: Vec<Value> = EVENTS
+        .iter()
+        .map(|(name, flag, is_error)| json!({"name": name, "flag": flag, "is_error": is_error}))
+        .collect();
+    Ok(json!({ "events": events }))
+}
+
+/// The `ZMQ_EVENT_*` flag for a monitor event `name` — the inverse of
+/// `parse_monitor_event`'s id→name map, and the same lookup `monitor` uses to
+/// build an event mask. Accepts `all` (every event). opts: `name`. Returns
+/// `{name, flag}`. Pure.
+fn op_monitor_event_flag(opts: Value) -> Result<Value> {
+    let name = req_str(&opts, "name")?;
+    let flag = event_flag(name)?;
+    Ok(json!({"name": name.to_ascii_lowercase(), "flag": flag}))
+}
+
+/// Plan the `subscribe`/`unsubscribe` calls to move a SUB socket from one
+/// subscription set to another — the set difference `desired \ current`
+/// (to add) and `current \ desired` (to remove). Order within each list
+/// follows the input. Lets a caller reconcile a topic filter without
+/// re-subscribing everything. opts: `current`, `desired` (arrays of strings).
+/// Returns `{add, remove, unchanged}`. Pure.
+fn op_subscription_diff(opts: Value) -> Result<Value> {
+    let as_set = |key: &str| -> Result<Vec<String>> {
+        opts.get(key)
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("missing {key} (array of strings)"))?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(String::from)
+                    .ok_or_else(|| anyhow!("each {key} entry must be a string"))
+            })
+            .collect()
+    };
+    let current = as_set("current")?;
+    let desired = as_set("desired")?;
+    let add: Vec<&String> = desired.iter().filter(|d| !current.contains(d)).collect();
+    let remove: Vec<&String> = current.iter().filter(|c| !desired.contains(c)).collect();
+    let unchanged: Vec<&String> = desired.iter().filter(|d| current.contains(d)).collect();
+    Ok(json!({"add": add, "remove": remove, "unchanged": unchanged}))
+}
+
+// ── context / runtime ────────────────────────────────────────────────────────
+
+/// Get or set the shared context's libzmq I/O-thread-pool size (`ZMQ_IO_THREADS`).
+/// With a `value` it sets the pool and echoes it back; without, it reads the
+/// current size. The default is 1; raise it for very high-throughput sockets.
+/// Applies process-wide (there is one shared context). opts: optional `value`
+/// (a non-negative integer). Returns `{io_threads}`.
+fn op_io_threads(opts: Value) -> Result<Value> {
+    if let Some(v) = opts.get("value").and_then(Value::as_i64) {
+        ctx().set_io_threads(v as i32)?;
+    }
+    Ok(json!({"io_threads": ctx().get_io_threads()?}))
+}
+
+/// Probe every optional libzmq capability at once — the batch form of `has`.
+/// Returns `{capabilities}`, a map of capability name to its `has()` answer
+/// (`true`/`false`, or `null` when the running libzmq is too old to report).
+/// Covers `ipc`/`pgm`/`tipc`/`norm`/`curve`/`gssapi`/`draft`.
+fn op_capabilities(_opts: Value) -> Result<Value> {
+    const CAPS: &[&str] = &["ipc", "pgm", "tipc", "norm", "curve", "gssapi", "draft"];
+    let map: serde_json::Map<String, Value> = CAPS
+        .iter()
+        .map(|c| (c.to_string(), json!(zmq::has(c))))
+        .collect();
+    Ok(json!({ "capabilities": map }))
+}
+
+// ── extra socket ops ─────────────────────────────────────────────────────────
+
+/// Non-blocking readiness via the `ZMQ_EVENTS` socket option (`get_events`),
+/// not a `zmq_poll` call — reads the socket's currently-pending event bitmask
+/// without a wait. `poll` blocks up to `timeout_ms`; this is the zero-wait peek.
+/// opts: `handle`. Returns `{readable, writable, events}` where `events` is the
+/// raw bitmask.
+fn op_events(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    with_socket(handle, |s| {
+        let ev = s.get_events()?;
+        Ok(json!({
+            "readable": ev.contains(zmq::POLLIN),
+            "writable": ev.contains(zmq::POLLOUT),
+            "events": ev.bits(),
+        }))
+    })
+}
+
+/// Drain the remaining frames of the multipart message currently being read on
+/// `handle` — every frame after the one the last `recv` returned, while
+/// `ZMQ_RCVMORE` is set. Complements `recv` (one frame) and `recv_multipart`
+/// (a whole fresh message): use it to finish reading a message you started with
+/// `recv`. opts: `handle`, optional `timeout_ms`, `encoding`. Returns `{parts}`
+/// (possibly empty when the last frame was already final), or `{timeout:true}`.
+fn op_recv_more(opts: Value) -> Result<Value> {
+    let handle = req_u64(&opts, "handle")?;
+    let timeout_ms = opts.get("timeout_ms").and_then(Value::as_i64);
+    or_timeout(with_socket(handle, |s| {
+        if let Some(t) = timeout_ms {
+            s.set_rcvtimeo(t as i32)?;
+        }
+        let mut parts: Vec<Value> = Vec::new();
+        while s.get_rcvmore()? {
+            let bytes = s.recv_bytes(0)?;
+            parts.push(Value::String(bytes_to_payload(&opts, &bytes)?));
+        }
+        Ok(json!({ "parts": parts }))
+    }))
+}
+
+/// Create a connected PAIR over a fresh `inproc://` endpoint in one call: bind
+/// one PAIR, connect the other, return both handles. The exclusive-pair pattern
+/// is the natural in-process channel between two stryke threads/tasks; this
+/// removes the bind/connect boilerplate. opts: optional `endpoint` (default a
+/// unique `inproc://stryke-zmq-pair-N`). Returns `{a, b, endpoint}` — `a` is the
+/// bound end, `b` the connected end.
+fn op_socket_pair(opts: Value) -> Result<Value> {
+    let endpoint = match opts.get("endpoint").and_then(Value::as_str) {
+        Some(e) => e.to_string(),
+        None => format!("inproc://stryke-zmq-pair-{}", next_handle()),
+    };
+    let a = ctx().socket(SocketType::PAIR)?;
+    a.bind(&endpoint)?;
+    let b = ctx().socket(SocketType::PAIR)?;
+    b.connect(&endpoint)?;
+    let ah = next_handle();
+    let bh = next_handle();
+    let mut map = sockets().lock();
+    map.insert(ah, a);
+    map.insert(bh, b);
+    Ok(json!({"a": ah, "b": bh, "endpoint": endpoint}))
+}
+
 // ── ffi boundary ─────────────────────────────────────────────────────────────
 
 /// JSON-string-in / JSON-string-out wrapper. Parses args (malformed →
@@ -1536,6 +1751,17 @@ export!(zmq__socket_types_compatible => op_socket_types_compatible);
 export!(zmq__socket_peers => op_socket_peers);
 export!(zmq__socket_caps => op_socket_caps);
 export!(zmq__socket_types => op_socket_types);
+export!(zmq__socket_type_id => op_socket_type_id);
+export!(zmq__socket_caps_all => op_socket_caps_all);
+export!(zmq__encoding_names => op_encoding_names);
+export!(zmq__socket_event_names => op_socket_event_names);
+export!(zmq__monitor_event_flag => op_monitor_event_flag);
+export!(zmq__subscription_diff => op_subscription_diff);
+export!(zmq__io_threads => op_io_threads);
+export!(zmq__capabilities => op_capabilities);
+export!(zmq__events => op_events);
+export!(zmq__recv_more => op_recv_more);
+export!(zmq__socket_pair => op_socket_pair);
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
@@ -2575,5 +2801,274 @@ mod tests {
         assert!(err_of(&call(zmq__socket_caps, r#"{"type":"nope"}"#))
             .to_lowercase()
             .contains("socket"));
+    }
+
+    // ── batch-2 surface ──────────────────────────────────────────────────────
+
+    #[test]
+    fn socket_type_id_returns_stable_zmq_constants() {
+        // The canonical libzmq ZMQ_* integers (zmq.h), exercised end to end.
+        for (name, id) in [
+            ("pair", 0),
+            ("pub", 1),
+            ("sub", 2),
+            ("req", 3),
+            ("rep", 4),
+            ("dealer", 5),
+            ("router", 6),
+            ("pull", 7),
+            ("push", 8),
+            ("xpub", 9),
+            ("xsub", 10),
+            ("stream", 11),
+        ] {
+            let v = call(zmq__socket_type_id, &format!(r#"{{"type":"{name}"}}"#));
+            assert_eq!(v["id"], json!(id), "{name} id");
+            assert_eq!(v["type"], json!(name));
+        }
+        // Aliases canonicalize before the id lookup.
+        assert_eq!(
+            call(zmq__socket_type_id, r#"{"type":"PUBLISH"}"#)["id"],
+            json!(1)
+        );
+        // Every advertised socket type has an id, and ids are unique.
+        let mut ids: Vec<i64> = Vec::new();
+        for ty in call(zmq__socket_types, "{}")["types"].as_array().unwrap() {
+            let id = call(
+                zmq__socket_type_id,
+                &format!(r#"{{"type":"{}"}}"#, ty.as_str().unwrap()),
+            )["id"]
+                .as_i64()
+                .unwrap();
+            assert!(!ids.contains(&id), "socket-type ids must be unique");
+            ids.push(id);
+        }
+        assert!(err_of(&call(zmq__socket_type_id, r#"{"type":"nope"}"#))
+            .to_lowercase()
+            .contains("socket"));
+    }
+
+    #[test]
+    fn socket_caps_all_matches_per_type_socket_caps() {
+        let all = call(zmq__socket_caps_all, "{}");
+        let caps = all["caps"].as_array().unwrap();
+        assert_eq!(caps.len(), 12, "one cap entry per canonical type");
+        // Each batched entry must equal the single-type call for that type.
+        for c in caps {
+            let ty = c["type"].as_str().unwrap();
+            let one = call(zmq__socket_caps, &format!(r#"{{"type":"{ty}"}}"#));
+            assert_eq!(c["pattern"], one["pattern"], "{ty} pattern matches");
+            assert_eq!(c["can_send"], one["can_send"], "{ty} can_send matches");
+            assert_eq!(c["can_recv"], one["can_recv"], "{ty} can_recv matches");
+        }
+    }
+
+    #[test]
+    fn encoding_names_lists_every_accepted_encoding() {
+        let v = call(zmq__encoding_names, "{}");
+        let names: Vec<&str> = v["encodings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["utf8", "hex", "base64"]);
+        // hex/base64 must be flagged binary-safe; utf8 must not.
+        let enc = v["encodings"].as_array().unwrap();
+        assert_eq!(
+            enc[0]["binary_safe"],
+            json!(false),
+            "utf8 is lossy on binary"
+        );
+        assert_eq!(enc[1]["binary_safe"], json!(true), "hex is binary-safe");
+        assert_eq!(enc[2]["binary_safe"], json!(true), "base64 is binary-safe");
+    }
+
+    #[test]
+    fn socket_event_names_and_flag_are_inverse() {
+        let v = call(zmq__socket_event_names, "{}");
+        let events = v["events"].as_array().unwrap();
+        assert_eq!(events.len(), 15, "fifteen monitor events");
+        // monitor_event_flag must round-trip every listed name to its flag, and
+        // that flag must agree with parse_monitor_event's decode of the same id.
+        for e in events {
+            let name = e["name"].as_str().unwrap();
+            let flag = e["flag"].as_i64().unwrap();
+            let got = call(zmq__monitor_event_flag, &format!(r#"{{"name":"{name}"}}"#));
+            assert_eq!(got["flag"].as_i64().unwrap(), flag, "{name} flag");
+            let decoded = call(zmq__parse_monitor_event, &format!(r#"{{"event":{flag}}}"#));
+            assert_eq!(decoded["name"], json!(name), "{name} decodes back");
+            assert_eq!(decoded["is_error"], e["is_error"], "{name} is_error agrees");
+        }
+        // `all` is libzmq's ZMQ_EVENT_ALL mask (0xFFFF) — a superset that must
+        // cover every individual event flag we list. It is broader than the OR
+        // of the 15 listed events because newer libzmq reserves further bits.
+        let all = call(zmq__monitor_event_flag, r#"{"name":"all"}"#)["flag"]
+            .as_i64()
+            .unwrap();
+        let or: i64 = events
+            .iter()
+            .fold(0, |m, e| m | e["flag"].as_i64().unwrap());
+        assert_eq!(
+            all & or,
+            or,
+            "`all` mask must cover every listed event flag"
+        );
+        assert!(call(zmq__monitor_event_flag, r#"{"name":"bogus"}"#)
+            .get("error")
+            .is_some());
+    }
+
+    #[test]
+    fn subscription_diff_computes_set_difference() {
+        let v = call(
+            zmq__subscription_diff,
+            r#"{"current":["a","b","c"],"desired":["b","c","d"]}"#,
+        );
+        assert_eq!(v["add"], json!(["d"]), "desired \\ current");
+        assert_eq!(v["remove"], json!(["a"]), "current \\ desired");
+        assert_eq!(
+            v["unchanged"],
+            json!(["b", "c"]),
+            "intersection in desired order"
+        );
+        // Empty current → everything is an add; empty desired → everything removed.
+        assert_eq!(
+            call(
+                zmq__subscription_diff,
+                r#"{"current":[],"desired":["x","y"]}"#
+            )["add"],
+            json!(["x", "y"])
+        );
+        assert_eq!(
+            call(
+                zmq__subscription_diff,
+                r#"{"current":["x","y"],"desired":[]}"#
+            )["remove"],
+            json!(["x", "y"])
+        );
+        assert!(err_of(&call(zmq__subscription_diff, r#"{"current":[]}"#)).contains("desired"));
+    }
+
+    #[test]
+    fn io_threads_reads_and_sets_the_pool() {
+        // The default pool is 1; read it, bump it, read it back, restore it.
+        let cur = call(zmq__io_threads, "{}")["io_threads"].as_i64().unwrap();
+        assert!(cur >= 1, "default io-thread pool is at least 1");
+        let set = call(zmq__io_threads, &format!(r#"{{"value":{}}}"#, cur + 1));
+        assert_eq!(set["io_threads"], json!(cur + 1), "set echoes the new size");
+        let back = call(zmq__io_threads, "{}");
+        assert_eq!(
+            back["io_threads"],
+            json!(cur + 1),
+            "set persists on the context"
+        );
+        // Restore so other tests see the original pool size.
+        call(zmq__io_threads, &format!(r#"{{"value":{cur}}}"#));
+    }
+
+    #[test]
+    fn capabilities_probes_every_known_capability() {
+        let v = call(zmq__capabilities, "{}");
+        let caps = v["capabilities"].as_object().unwrap();
+        for c in ["ipc", "pgm", "tipc", "norm", "curve", "gssapi", "draft"] {
+            assert!(caps.contains_key(c), "capabilities must report {c}");
+            let val = &caps[c];
+            assert!(
+                val.is_boolean() || val.is_null(),
+                "{c} must be bool or null, got {val}"
+            );
+        }
+        // Agrees with the single-capability `has` op for each key.
+        for c in ["ipc", "curve"] {
+            let one = call(zmq__has, &format!(r#"{{"capability":"{c}"}}"#))["has"].clone();
+            assert_eq!(caps[c], one, "capabilities[{c}] agrees with has({c})");
+        }
+    }
+
+    #[test]
+    fn events_reports_nonblocking_readiness() {
+        // A PULL with a queued message must read POLLIN via ZMQ_EVENTS without a
+        // wait — distinct from poll(), which is a zmq_poll syscall.
+        let ep = "inproc://stryke-zmq-test-events";
+        let pull = call(zmq__socket, &format!(r#"{{"type":"pull","bind":"{ep}"}}"#));
+        let push = call(
+            zmq__socket,
+            &format!(r#"{{"type":"push","connect":"{ep}"}}"#),
+        );
+        let ph = pull["handle"].as_u64().unwrap();
+        let xh = push["handle"].as_u64().unwrap();
+        // Idle puller: not readable.
+        let idle = call(zmq__events, &format!(r#"{{"handle":{ph}}}"#));
+        assert_eq!(
+            idle["readable"],
+            json!(false),
+            "idle puller is not readable"
+        );
+        call(zmq__send, &format!(r#"{{"handle":{xh},"data":"x"}}"#));
+        // Give the message a moment to land, then poll to settle the event bit,
+        // which get_events reflects.
+        call(zmq__poll, &format!(r#"{{"handle":{ph},"timeout_ms":500}}"#));
+        let ready = call(zmq__events, &format!(r#"{{"handle":{ph}}}"#));
+        assert_eq!(ready["readable"], json!(true), "queued message → readable");
+        assert!(ready["events"].as_i64().unwrap() != 0, "raw bitmask is set");
+        call(zmq__close, &format!(r#"{{"handle":{ph}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{xh}}}"#));
+    }
+
+    #[test]
+    fn recv_more_drains_trailing_frames_after_recv() {
+        // Send a 3-frame multipart; recv() takes the first frame, recv_more()
+        // must drain the remaining two.
+        let ep = "inproc://stryke-zmq-test-recvmore";
+        let srv = call(zmq__socket, &format!(r#"{{"type":"pair","bind":"{ep}"}}"#));
+        let cli = call(
+            zmq__socket,
+            &format!(r#"{{"type":"pair","connect":"{ep}"}}"#),
+        );
+        let sh = srv["handle"].as_u64().unwrap();
+        let ch = cli["handle"].as_u64().unwrap();
+        call(
+            zmq__send_multipart,
+            &format!(r#"{{"handle":{ch},"parts":["one","two","three"]}}"#),
+        );
+        let first = call(
+            zmq__recv,
+            &format!(r#"{{"handle":{sh},"timeout_ms":1000}}"#),
+        );
+        assert_eq!(first["data"], "one", "recv takes the first frame");
+        assert_eq!(first["more"], json!(true), "more frames remain");
+        let rest = call(
+            zmq__recv_more,
+            &format!(r#"{{"handle":{sh},"timeout_ms":1000}}"#),
+        );
+        assert_eq!(
+            rest["parts"],
+            json!(["two", "three"]),
+            "recv_more drains the tail"
+        );
+        call(zmq__close, &format!(r#"{{"handle":{sh}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{ch}}}"#));
+    }
+
+    #[test]
+    fn socket_pair_creates_a_connected_inproc_channel() {
+        let p = call(zmq__socket_pair, "{}");
+        let a = p["a"].as_u64().expect("bound handle");
+        let b = p["b"].as_u64().expect("connected handle");
+        assert_ne!(a, b, "the two ends get distinct handles");
+        assert!(
+            p["endpoint"].as_str().unwrap().starts_with("inproc://"),
+            "default endpoint is inproc"
+        );
+        // The pair must actually carry a message both directions.
+        call(zmq__send, &format!(r#"{{"handle":{a},"data":"to-b"}}"#));
+        let gb = call(zmq__recv, &format!(r#"{{"handle":{b},"timeout_ms":1000}}"#));
+        assert_eq!(gb["data"], "to-b", "a → b");
+        call(zmq__send, &format!(r#"{{"handle":{b},"data":"to-a"}}"#));
+        let ga = call(zmq__recv, &format!(r#"{{"handle":{a},"timeout_ms":1000}}"#));
+        assert_eq!(ga["data"], "to-a", "b → a");
+        call(zmq__close, &format!(r#"{{"handle":{a}}}"#));
+        call(zmq__close, &format!(r#"{{"handle":{b}}}"#));
     }
 }

@@ -101,7 +101,7 @@
         <div class="stat-card"><div class="stat-val">Zmq</div><div class="stat-label">use namespace</div></div>
         <div class="stat-card"><div class="stat-val cyan">opt-in</div><div class="stat-label">Tier 2</div></div>
         <div class="stat-card"><div class="stat-val">cdylib</div><div class="stat-label">in-process FFI</div></div>
-        <div class="stat-card"><div class="stat-val green">12</div><div class="stat-label">zmq__* FFI exports</div></div>
+        <div class="stat-card"><div class="stat-val green">55</div><div class="stat-label">zmq__* FFI exports</div></div>
       </div>
 
       <hr class="section-rule">
@@ -111,7 +111,7 @@
         <thead><tr><th>Layer</th><th>Implementation</th></tr></thead>
         <tbody>
           <tr><td>stryke library</td><td><code>lib/Zmq.stk</code> &mdash; thin wrapper; serializes args to JSON, decodes responses, maps <code>{error}</code> to <code>die</code> and <code>{timeout}</code> to <code>undef</code></td></tr>
-          <tr><td>cdylib</td><td><code>libstryke_zmq.{dylib,so}</code> &mdash; 12 <code>#[no_mangle] zmq__*</code> exports, JSON-string-in / JSON-string-out, <code>catch_unwind</code> at the boundary</td></tr>
+          <tr><td>cdylib</td><td><code>libstryke_zmq.{dylib,so}</code> &mdash; 55 <code>#[no_mangle] zmq__*</code> exports, JSON-string-in / JSON-string-out, <code>catch_unwind</code> at the boundary</td></tr>
           <tr><td>State</td><td>One shared <code>zmq::Context</code> + a socket registry <code>Mutex&lt;HashMap&lt;u64, Socket&gt;&gt;</code> in <code>OnceCell</code>; sockets persist across calls</td></tr>
           <tr><td>Thread safety</td><td><code>zmq::Socket</code> is <code>Send</code>, not <code>Sync</code>; the mutex gives one-thread-at-a-time access + the cross-thread memory fence libzmq requires</td></tr>
           <tr><td>Native dependency</td><td>libzmq + libsodium vendored from source via <code>zeromq-src</code> (cmake), statically linked &mdash; no system <code>libzmq</code></td></tr>

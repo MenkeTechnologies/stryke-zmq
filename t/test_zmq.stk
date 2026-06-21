@@ -255,4 +255,82 @@ assert_eq Zmq::socket_caps("xpub")->{can_recv}, 1, "socket_caps: xpub is bidirec
 assert_eq Zmq::socket_caps("PUBLISH")->{type}, "pub", "socket_caps: alias canonicalized"
 assert_dies fn { Zmq::socket_caps("nope") }, "socket_caps: rejects an unknown socket type"
 
+# ── batch-2 surface ──────────────────────────────────────────────────
+
+# socket_type_id: stable libzmq ZMQ_* integers.
+assert_eq Zmq::socket_type_id("pair"), 0,  "socket_type_id: pair = 0"
+assert_eq Zmq::socket_type_id("req"),  3,  "socket_type_id: req = 3"
+assert_eq Zmq::socket_type_id("PUBLISH"), 1, "socket_type_id: alias canonicalizes to pub = 1"
+assert_dies fn { Zmq::socket_type_id("nope") }, "socket_type_id: rejects unknown type"
+
+# socket_caps_all: batch form agrees with the per-type call.
+val @capsall = Zmq::socket_caps_all()
+assert_eq scalar(@capsall), 12, "socket_caps_all: one entry per canonical type"
+val ($pubcap) = grep { $_->{type} eq "pub" } @capsall
+assert_eq $pubcap->{can_send}, Zmq::socket_caps("pub")->{can_send}, "socket_caps_all: matches socket_caps for pub"
+
+# encoding_names: the framing dimension.
+val @encs = Zmq::encoding_names()
+assert_eq scalar(@encs), 3, "encoding_names: three encodings"
+assert_eq $encs[0]{name}, "utf8", "encoding_names: utf8 first"
+assert_eq $encs[1]{binary_safe}, 1, "encoding_names: hex is binary-safe"
+
+# socket_event_names / monitor_event_flag: inverse of parse_monitor_event.
+val @evnames = Zmq::socket_event_names()
+assert_eq scalar(@evnames), 15, "socket_event_names: fifteen monitor events"
+assert_eq Zmq::monitor_event_flag("accepted"), 0x20, "monitor_event_flag: accepted = 0x20"
+assert_eq Zmq::parse_monitor_event(event => Zmq::monitor_event_flag("listening"))->{name}, "listening", "monitor_event_flag round-trips parse_monitor_event"
+assert_dies fn { Zmq::monitor_event_flag("bogus") }, "monitor_event_flag: rejects unknown event"
+
+# subscription_diff: set difference to reconcile a SUB topic filter.
+val $sd = Zmq::subscription_diff(["a", "b", "c"], ["b", "c", "d"])
+assert_eq join(",", @{ $sd->{add} }),       "d",   "subscription_diff: add = desired \\ current"
+assert_eq join(",", @{ $sd->{remove} }),    "a",   "subscription_diff: remove = current \\ desired"
+assert_eq join(",", @{ $sd->{unchanged} }), "b,c", "subscription_diff: unchanged = intersection"
+
+# capabilities: batch form agrees with has() per key.
+val $caps = Zmq::capabilities()
+assert_ok exists $caps->{curve}, "capabilities: reports curve"
+assert_eq $caps->{ipc}, Zmq::has("ipc"), "capabilities: ipc agrees with has(ipc)"
+
+# io_threads: read, bump, restore the shared context's I/O pool.
+val $iot = Zmq::io_threads()
+assert_ok $iot >= 1, "io_threads: default pool is at least 1"
+assert_eq Zmq::io_threads($iot + 1), $iot + 1, "io_threads: set echoes the new size"
+Zmq::io_threads($iot)
+
+# events: non-blocking readiness over a real inproc PUSH/PULL pair.
+val $ev_ep = "inproc://test-events-$$"
+val $ev_pull = Zmq::socket("pull", bind => $ev_ep)
+val $ev_push = Zmq::socket("push", connect => $ev_ep)
+assert_eq Zmq::events($ev_pull)->{readable}, 0, "events: idle puller is not readable"
+Zmq::send($ev_push, "peek")
+Zmq::poll($ev_pull, timeout_ms => 500)
+assert_ok Zmq::events($ev_pull)->{readable}, "events: queued message → readable (no wait)"
+Zmq::close($ev_push)
+Zmq::close($ev_pull)
+
+# recv_more: drain trailing frames after a single recv().
+val $rm_ep = "inproc://test-recvmore-$$"
+val $rm_a = Zmq::socket("pair", bind => $rm_ep)
+val $rm_b = Zmq::socket("pair", connect => $rm_ep)
+Zmq::send_multipart($rm_b, ["one", "two", "three"])
+val $rm_first = Zmq::recv($rm_a, timeout_ms => 2000)
+assert_eq $rm_first, "one", "recv_more: recv takes the first frame"
+val @rm_rest = Zmq::recv_more($rm_a, timeout_ms => 2000)
+assert_eq join(",", @rm_rest), "two,three", "recv_more: drains the trailing frames"
+Zmq::close($rm_a)
+Zmq::close($rm_b)
+
+# socket_pair: one-call connected inproc PAIR, carries both directions.
+val $sp = Zmq::socket_pair()
+assert_ok $sp->{a} != $sp->{b}, "socket_pair: distinct handles"
+assert_match qr{^inproc://}, $sp->{endpoint}, "socket_pair: default endpoint is inproc"
+Zmq::send($sp->{a}, "to-b")
+assert_eq Zmq::recv($sp->{b}, timeout_ms => 2000), "to-b", "socket_pair: a → b"
+Zmq::send($sp->{b}, "to-a")
+assert_eq Zmq::recv($sp->{a}, timeout_ms => 2000), "to-a", "socket_pair: b → a"
+Zmq::close($sp->{a})
+Zmq::close($sp->{b})
+
 test_run
