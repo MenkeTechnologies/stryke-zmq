@@ -16,9 +16,10 @@
 
 > *"Brokerless messaging, no daemon to babysit."*
 
-ZeroMQ client for stryke — the brokerless messaging library. All four
-canonical patterns (request/reply, publish/subscribe, push/pull pipeline,
-dealer/router) plus PAIR, over TCP, IPC, or in-process transports. Opt-in
+ZeroMQ client for stryke — the brokerless messaging library. Five
+patterns: the four canonical ones (request/reply, publish/subscribe,
+push/pull pipeline, dealer/router) plus PAIR, over TCP, IPC, or in-process
+transports. Opt-in
 package tier, kept out of the stryke core binary so the daily-driver
 install stays slim.
 
@@ -47,7 +48,7 @@ install stays slim.
 ZeroMQ integration requires libzmq, the C library every ZMQ binding wraps.
 The Rust binding (`zmq` → `zmq-sys` → `zeromq-src`) compiles libzmq and
 libsodium from source and links them statically. The artifact is big
-enough that it doesn't belong in stryke core. Opt in once, get all four
+enough that it doesn't belong in stryke core. Opt in once, get all five
 messaging patterns.
 
 `stryke-zmq` ships a thin stryke library plus a Rust cdylib
