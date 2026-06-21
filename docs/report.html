@@ -102,6 +102,8 @@
         <div class="stat-card"><div class="stat-val cyan">opt-in</div><div class="stat-label">Tier 2</div></div>
         <div class="stat-card"><div class="stat-val">cdylib</div><div class="stat-label">in-process FFI</div></div>
         <div class="stat-card"><div class="stat-val green">60</div><div class="stat-label">zmq__* FFI exports</div></div>
+        <div class="stat-card"><div class="stat-val cyan">62</div><div class="stat-label">Zmq:: functions</div></div>
+        <div class="stat-card"><div class="stat-val green">55</div><div class="stat-label">Rust tests</div></div>
       </div>
 
       <hr class="section-rule">
@@ -116,7 +118,8 @@
           <tr><td>Thread safety</td><td><code>zmq::Socket</code> is <code>Send</code>, not <code>Sync</code>; the mutex gives one-thread-at-a-time access + the cross-thread memory fence libzmq requires</td></tr>
           <tr><td>Native dependency</td><td>libzmq + libsodium vendored from source via <code>zeromq-src</code> (cmake), statically linked &mdash; no system <code>libzmq</code></td></tr>
           <tr><td>Build</td><td>Cargo cdylib crate (<code>publish = false</code>); ships via <code>s pkg install -g .</code> or a prebuilt release tarball per host triple</td></tr>
-          <tr><td>Tests</td><td>11 Rust FFI-contract tests over <code>inproc://</code> + 24 stryke assertions (functional + surface) + 21 docs/readme lint gates</td></tr>
+          <tr><td>Tests</td><td>55 Rust unit + FFI-contract tests over <code>inproc://</code> + 223 stryke assertions (165 functional + 58 surface-completeness) + 21 docs/readme/man/workflow lint gates</td></tr>
+          <tr><td>Public surface</td><td>62 <code>Zmq::*</code> functions in <code>lib/Zmq.stk</code> &mdash; socket ops over the cdylib + pure helpers (validation, endpoint, topic, table) with no FFI socket call</td></tr>
           <tr><td>CI</td><td><code>.github/workflows/ci.yml</code> &mdash; fmt + clippy <code>-D warnings</code> + test on Linux/macOS, doc, release-build matrix, docs gates</td></tr>
         </tbody>
       </table>
@@ -135,6 +138,25 @@
         </tbody>
       </table>
       <p>Transports: <code>tcp://</code>, <code>ipc://</code>, <code>inproc://</code>, and multicast <code>pgm://</code> / <code>epgm://</code>.</p>
+
+      <hr class="section-rule">
+      <h2 class="tutorial-title"><span class="step-hash">@</span>FUNCTION FAMILIES</h2>
+      <p class="tutorial-subtitle">The 62 <code>Zmq::*</code> functions split into socket ops (require a live handle, cross the FFI boundary to libzmq) and pure helpers (validation/endpoint/topic/table utilities that create no socket).</p>
+      <table class="arch-table">
+        <thead><tr><th>Family</th><th>Functions</th></tr></thead>
+        <tbody>
+          <tr><td>Introspection</td><td><code>version lib_version has capabilities io_threads</code></td></tr>
+          <tr><td>Lifecycle</td><td><code>socket socket_pair socket_count close bind connect unbind disconnect</code></td></tr>
+          <tr><td>Send / receive</td><td><code>send send_multipart recv recv_multipart recv_more drain sendrecv request</code></td></tr>
+          <tr><td>Pub/sub</td><td><code>subscribe unsubscribe</code></td></tr>
+          <tr><td>Options / readiness</td><td><code>set get poll poll_many events</code></td></tr>
+          <tr><td>Monitor / proxy</td><td><code>monitor monitor_recv proxy</code></td></tr>
+          <tr><td>CURVE / Z85</td><td><code>curve_keypair curve_public valid_curve_key z85_encode z85_decode z85_valid</code></td></tr>
+          <tr><td>Endpoint helpers (pure)</td><td><code>parse_endpoint build_endpoint endpoint_bind_to_connect endpoint_connect_to_bind valid_endpoint</code></td></tr>
+          <tr><td>Topic / subscription (pure)</td><td><code>topic_match topic_match_any topic_overlaps prune_subscriptions subscription_diff build_subscription parse_subscription</code></td></tr>
+          <tr><td>Type / table (pure)</td><td><code>valid_socket_type socket_types socket_type_id socket_peers socket_types_compatible socket_caps socket_caps_all socket_option_names valid_socket_option encoding_names socket_event_names monitor_event_flag parse_monitor_event</code></td></tr>
+        </tbody>
+      </table>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">&amp;</span>WHY OPT-IN (NOT BUILTIN)</h2>
@@ -156,7 +178,7 @@
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">%</span>SCOPE</h2>
-      <p>See the README's <a href="https://github.com/MenkeTechnologies/stryke-zmq#0x00-why-this-is-a-package-not-a-builtin">"Why this is a package"</a> and <a href="https://github.com/MenkeTechnologies/stryke-zmq#0x04-api-reference">API reference</a> for the authoritative scope. v0.17.0 covers socket lifecycle, send/recv (single + multipart), pub/sub topic filters, socket options, poll, a one-shot REQ convenience, and pure topology/endpoint/Z85/CURVE-key helpers (`curve_keypair`, `curve_public`, `valid_curve_key`, `endpoint_bind_to_connect`, `endpoint_connect_to_bind`, `valid_endpoint`, `build_subscription`, `parse_subscription`, `topic_overlaps`, `prune_subscriptions`, `parse_monitor_event`). Roadmap: CURVE security (libsodium is already linked), a streaming recv callback loop, binary-safe payloads, and multi-socket poll.</p>
+      <p>See the README's <a href="https://github.com/MenkeTechnologies/stryke-zmq#0x00-why-this-is-a-package-not-a-builtin">"Why this is a package"</a> and <a href="https://github.com/MenkeTechnologies/stryke-zmq#0x04-api-reference">API reference</a> for the authoritative scope. v0.17.0 covers socket lifecycle (create/close/bind/connect/unbind/disconnect, <code>socket_pair</code>, <code>socket_count</code>), send/recv (single, multipart, <code>recv_more</code>, non-blocking <code>drain</code>, <code>sendrecv</code>), pub/sub topic filters, the full socket-option table (<code>set</code>/<code>get</code>), <code>poll</code>/<code>poll_many</code>/<code>events</code> readiness, socket-event monitoring (<code>monitor</code>/<code>monitor_recv</code>), a backgrounded <code>proxy</code> device, binary-safe <code>hex</code>/<code>base64</code> payloads, the Z85 codec + CURVE key generation (<code>curve_keypair</code>, <code>curve_public</code>, <code>valid_curve_key</code>; CURVE auth via <code>curve_*</code> options), context <code>io_threads</code> tuning, a one-shot REQ convenience (<code>request</code>), and pure topology/endpoint/table helpers (<code>endpoint_bind_to_connect</code>, <code>endpoint_connect_to_bind</code>, <code>valid_endpoint</code>, <code>build_subscription</code>, <code>parse_subscription</code>, <code>topic_overlaps</code>, <code>prune_subscriptions</code>, <code>subscription_diff</code>, <code>socket_caps_all</code>, <code>parse_monitor_event</code>). Open roadmap: a streaming recv callback loop for long-running SUB/PULL consumers and a higher-level steerable-proxy control helper (PAUSE/RESUME/TERMINATE).</p>
 
       <hr class="section-rule">
       <h2 class="tutorial-title"><span class="step-hash">#</span>PROJECT METADATA</h2>
